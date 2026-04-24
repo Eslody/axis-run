@@ -1,0 +1,37 @@
+.git
+.gitignore
+.gitattributes
+.github
+
+# Editors / OS
+.idea
+.vscode
+.DS_Store
+
+# Python dev artifacts
+__pycache__
+*.pyc
+*.pyo
+*.py[cod]
+.venv
+venv
+env
+ENV
+
+# Packaging outputs
+build
+dist
+*.egg-info
+
+# Test / coverage
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+.mypy_cache
+.ruff_cache
+
+# Docs/tests are not needed inside the wheel
+docs
+tests

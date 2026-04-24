@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axis-run"
+version = "0.1.0"
+description = "torchrun-compatible launcher with fault tolerance; bundles a patched dlrover"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+    { name = "training-platform" },
+]
+keywords = ["pytorch", "torchrun", "elastic", "fault-tolerance", "dlrover"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# 运行时必需依赖，来自 dlrover/setup.py install_requires
+# （axis_run 本身只用标准库，所有核心依赖都来自被打包进来的 dlrover）
+dependencies = [
+    "psutil",
+    "deprecated",
+    "requests",
+    "packaging",
+]
+
+# 与 dlrover/setup.py 保持一致（名字不变）
+[project.optional-dependencies]
+dashboard = ["tornado"]
+k8s = ["kubernetes", "tornado", "grpcio"]
+ray = ["ray[default]", "omegaconf", "pydantic"]
+tensorflow = ["tensorflow"]
+torch = ["torch"]
+nv = ["nvidia-ml-py"]
+brain = ["fastapi", "uvicorn", "pydantic", "httpx"]
+test = ["pytest>=7", "pytest-mock>=3.10"]
+
+[project.scripts]
+axis-run = "axis_run.main:entrypoint"
+# 保留上游 CLI，便于排障与兼容已有脚本
+dlrover-run = "dlrover.trainer.torch.main:main"
+
+[project.urls]
+Homepage = "https://github.com/training-platform/axis-run"
+
+# 同时打包 axis_run 和内嵌的 dlrover 命名空间
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["axis_run*", "dlrover*"]
+exclude = ["tests*", "docs*", "scripts*"]
+
+# 复刻 dlrover 原有 package_data，避免漏 proto/模板等非 .py 资源
+[tool.setuptools.package-data]
+dlrover = [
+    "proto/*",
+    "docker/*",
+    "Makefile",
+    "trainer/check/*",
+]
+"dlrover.dashboard" = [
+    "templates/*.html",
+    "static/css/*.css",
+    "static/js/*.js",
+    "static/img/*",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-q"

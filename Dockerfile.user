@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.6
+#
+# Dockerfile.user —— 示例：把 axis-run 装进一个已有的 PyTorch 训练镜像
+# ----------------------------------------------------------------
+# 典型用法：把这个文件放到 axis-run 仓库根目录（和 pyproject.toml 同级），
+# 然后在业务 CI 里基于自己的 PyTorch 基础镜像构建：
+#
+#   docker build -f Dockerfile.user \
+#       --build-arg BASE_IMAGE=<你的 pytorch 镜像> \
+#       -t my-train:<ver> .
+#
+# 构建出的镜像满足：
+#   * 已安装 axis-run + 内嵌 dlrover；
+#   * 已设置 AXIS_FAULT_CONFIG_DIR / AXIS_MASTER_PORT 默认值；
+#   * ENTRYPOINT=axis-run，CMD 由用户在 TrainJob/JobSet 里覆盖。
+#
+# 如果你只想要一个纯净的 PyTorch 镜像，把 ENTRYPOINT 那行删掉即可。
+
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:24.10-py3
+FROM ${BASE_IMAGE}
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    AXIS_FAULT_CONFIG_DIR=/etc/training-platform/fault \
+    AXIS_MASTER_PORT=50001
+
+# 把整个仓库（axis_run + dlrover）拷进来，一次 pip install 解决两者
+WORKDIR /opt/axis-run
+COPY pyproject.toml LICENSE README.md ./
+COPY axis_run ./axis_run
+COPY dlrover ./dlrover
+COPY scripts ./scripts
+
+# 注意：--no-deps 不要开，torch 已在基础镜像里但 psutil / requests 可能缺
+RUN pip install .
+
+# 自检：import 两个命名空间 + CLI 可用
+RUN python -c "import axis_run, dlrover; print('axis-run', axis_run.__version__)" \
+ && axis-run --help >/dev/null
+
+WORKDIR /workspace
+ENTRYPOINT ["axis-run"]
