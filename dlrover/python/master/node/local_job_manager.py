@@ -156,7 +156,7 @@ class LocalJobManager(JobManager):
         return False
 
     def get_opt_strategy(self) -> ParallelConfig:
-        strategy = self._job_strategy_generator.generate_opt_strategy()
+        strategy = self._get_job_strategy_generator().generate_opt_strategy()
         return strategy
 
     def update_node_paral_config(self, node_type, node_id, paral_config):

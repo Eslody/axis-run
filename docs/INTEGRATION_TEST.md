@@ -5,18 +5,40 @@
 
 1. 构建并推送 `axis-run` 基础镜像：
    ```bash
-   docker build -f services/axis-run/Dockerfile \
-       --build-arg DLROVER_REPO=https://<org>/dlrover.git \
-       --build-arg DLROVER_REF=axis-run-main \
-       -t <registry>/axis-run:0.1.0 services/axis-run
+   # 在独立 axis-run 仓库根目录执行
+   docker build -t <registry>/axis-run:0.1.0 .
    ```
-2. 构建并推送用户训练镜像（参考 `services/axis-run/Dockerfile.user`）。
+2. 构建并推送用户训练镜像（参考仓库根目录的 `Dockerfile.user`）。
 3. `training-platform-plugin/charts/fault-restart-controller` 与
    `training-platform-plugin/charts/snapshot-agent` 已部署，对应 ConfigMap
    `job-fault-<TrainJob.Name>` 由 controller 正常创建。
 4. Kubeflow Trainer 组件已部署，并且最新版 `torch` plugin 已把
    `AXIS_MASTER_PORT / AXIS_FAULT_CONFIG_DIR / NODE_NAME / JOB_NAME` 注入
    到 trainer container。
+
+> axis-run runtime 不需要 `kubernetes` Python 包。Pod 重建、换节点、ConfigMap 写入等 Kubernetes 操作全部由 training-platform / tp-plugin 平台层完成；axis-run 只读取已挂载的故障信息并向 dlrover local master/agent 做本地决策。
+
+## Phase 0: 最小兼容检查（Pod / 裸机均可）
+
+在进入 K8s 全流程前，用当前训练镜像里的 **torch + axis-run** 快速确认兼容层与 CLI 正常。
+
+```bash
+# 1) 记录 torch 版本（升级 torch 后务必重跑本 Phase）
+python -c "import torch; print('torch', torch.__version__)"
+
+# 2) 参数解析与入口（需已安装 torch）
+axis-run --help | head -20
+
+# 3) 可选：单机 1 proc + 故意崩溃 + elastic 重启（需自备最小训练脚本与 ckpt 目录）
+# mkdir -p /workspace/ckpt-axis-test
+# axis-run --standalone --nnodes=1 --nproc-per-node=1 --max-restarts=3 \
+#   --ckpt-dir /workspace/ckpt-axis-test /path/to/test_resume.py --steps 20 --crash-step 5
+```
+
+**验证点**
+
+- 无 `SubprocessHandler.__init__() missing ... numa_options` 等启动期异常。
+- `axis-run --help` 能打印出 torchrun 风格参数及 `--fault-config` / `--ckpt-dir` 等扩展项。
 
 ## Phase 1: 单节点 smoke test
 

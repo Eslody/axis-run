@@ -17,7 +17,6 @@ import time
 from abc import ABCMeta, abstractmethod
 from typing import Dict
 
-from dlrover.python.brain.client import GlobalBrainClient
 from dlrover.python.common.constants import (
     JobOptStage,
     NodeResourceLimit,
@@ -29,10 +28,6 @@ from dlrover.python.common.global_context import Context
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node, NodeGroupResource, NodeResource
 from dlrover.python.common.serialize import JsonSerializable
-from dlrover.python.master.resource.brain_optimizer import (
-    BrainResoureOptimizer,
-)
-from dlrover.python.master.resource.local_optimizer import PSLocalOptimizer
 from dlrover.python.master.resource.optimizer import (
     ResourcePlan,
     SimpleOptimizer,
@@ -51,14 +46,27 @@ def new_ps_resource_optimizer(
         "New %s resource optimizer for job %s", optimize_mode, job_uuid
     )
     if optimize_mode == OptimizeMode.CLUSTER:
+        from dlrover.python.brain.client import GlobalBrainClient
+        from dlrover.python.master.resource.brain_optimizer import (
+            BrainResoureOptimizer,
+        )
+
         if GlobalBrainClient.BRAIN_CLIENT.available():
             return BrainResoureOptimizer(job_uuid, resource_limits)
         else:
             logger.warning(
                 "Brain service is not available, use a local optimizer"
             )
+            from dlrover.python.master.resource.local_optimizer import (
+                PSLocalOptimizer,
+            )
+
             return PSLocalOptimizer(job_uuid, resource_limits)
     elif optimize_mode == OptimizeMode.SINGLE_JOB:
+        from dlrover.python.master.resource.local_optimizer import (
+            PSLocalOptimizer,
+        )
+
         return PSLocalOptimizer(job_uuid, resource_limits)
     else:
         logger.warning(
