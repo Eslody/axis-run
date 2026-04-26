@@ -28,12 +28,13 @@ dependencies = [
     "deprecated",
     "requests",
     "packaging",
+    "grpcio",
+    "protobuf",
 ]
 
-# 与 dlrover/setup.py 保持一致（名字不变）
+# axis-run 仅使用 dlrover local master；Kubernetes 操作由 training-platform 平台层完成。
 [project.optional-dependencies]
 dashboard = ["tornado"]
-k8s = ["kubernetes", "tornado", "grpcio"]
 ray = ["ray[default]", "omegaconf", "pydantic"]
 tensorflow = ["tensorflow"]
 torch = ["torch"]

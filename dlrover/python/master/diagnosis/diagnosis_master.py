@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any
 
 from dlrover.python.common.constants import (
     EventReportConstants,
+    PlatformType,
     PreCheckStatus,
 )
 from dlrover.python.common.event.context import JobEventContext
@@ -29,9 +30,6 @@ from dlrover.python.diagnosis.common.constants import (
 )
 from dlrover.python.diagnosis.common.diagnosis_data import DiagnosisData
 from dlrover.python.diagnosis.common.diagnosis_manager import DiagnosisManager
-from dlrover.python.diagnosis.diagnostician.node_inconsistency import (
-    NodeInconsistencyDiagnostician,
-)
 from dlrover.python.diagnosis.diagnostician.training_hang import (
     TrainingHangDiagnostician,
 )
@@ -296,11 +294,19 @@ class DiagnosisMaster(DiagnosisManager):
         return {"job_nodes": self._job_context.job_nodes()}
 
     def _register_diagnosticians(self):
-        self.register_diagnostician(
-            DiagnosticianType.NODE_INCONSISTENCY,
-            NodeInconsistencyDiagnostician(self._job_args),
-            60 * 5,
-        )
+        if self._job_args and self._job_args.platform in (
+            PlatformType.KUBERNETES,
+            PlatformType.PY_KUBERNETES,
+        ):
+            from dlrover.python.diagnosis.diagnostician.node_inconsistency import (
+                NodeInconsistencyDiagnostician,
+            )
+
+            self.register_diagnostician(
+                DiagnosticianType.NODE_INCONSISTENCY,
+                NodeInconsistencyDiagnostician(self._job_args),
+                60 * 5,
+            )
 
         self.register_diagnostician(
             DiagnosticianType.TRAINING_HANG,
