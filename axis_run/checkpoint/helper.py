@@ -30,8 +30,8 @@
     if state is not None:
         model.load_state_dict(state["model"])
 
-目录规则（模仿 wall-x）：``{root}/{epoch}_{step}/``。当 ``step == 0`` 时目录名
-只含 epoch，与 wall-x 对齐，便于阅读。
+默认目录规则交给 dlrover 管理：``{root}/{global_step}/rank_<rank>.pt``。
+这样多节点 DDP 下每个保存 rank 会写独立 shard，避免共享同一个 path。
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ class FlashCheckpointHelper:
             构造时抛 :class:`CheckpointUnavailable`。
         shard_num_per_node: 与 dlrover ``local_shard_num`` 语义一致，默认 1（每节点
             整体一个 shard）。FSDP 分片训练时可设为每节点 rank 数。
-        global_shard_num: dlrover 全局 shard 数，默认 1。
+        global_shard_num: dlrover 全局 shard 数；默认自动按 DDP 节点数推导。
         comm_backend: 参与 shm 同步的 comm backend，默认跟随 DDP 主 pg。
         save_timeout: 每次 disk 保存 rank 间等待的超时（秒），默认用 dlrover 缺省。
         replica_count: 副本数，非 0 时 dlrover 会在多节点间互备 ckpt，适合多副本存储。
@@ -84,7 +84,7 @@ class FlashCheckpointHelper:
         self,
         root: Optional[str] = None,
         shard_num_per_node: int = 1,
-        global_shard_num: int = 1,
+        global_shard_num: Optional[int] = None,
         comm_backend: str = "",
         save_timeout: Optional[int] = None,
         replica_count: int = 0,
@@ -100,17 +100,22 @@ class FlashCheckpointHelper:
         DdpCheckpointer, StorageType = _require_dlrover()
         self._StorageType = StorageType
 
+        resolved_global_shard_num = (
+            global_shard_num
+            if global_shard_num is not None
+            else self._infer_global_shard_num(shard_num_per_node)
+        )
         kwargs: Dict[str, Any] = dict(
             checkpoint_dir=self._root,
             local_shard_num=shard_num_per_node,
-            global_shard_num=global_shard_num,
+            global_shard_num=resolved_global_shard_num,
             comm_backend=comm_backend,
             replica_count=replica_count,
         )
         if save_timeout is not None:
             kwargs["save_timeout"] = save_timeout
         self._checkpointer = DdpCheckpointer(**kwargs)
-        self._global_shard_num = global_shard_num
+        self._global_shard_num = resolved_global_shard_num
 
     # -- Public API -------------------------------------------------------
 
@@ -126,13 +131,13 @@ class FlashCheckpointHelper:
         path: Optional[str] = None,
     ) -> str:
         """仅写入共享内存。秒级返回；进程崩溃后可由新 agent 从 SHM 恢复。"""
-        global_step, target_path = self._resolve_step_and_path(
+        global_step, target_path, checkpoint_path = self._resolve_step_and_path(
             epoch, step, path
         )
         self._checkpointer.save_checkpoint(
             global_step,
             state,
-            target_path,
+            checkpoint_path,
             storage_type=self._StorageType.MEMORY,
         )
         logger.info(
@@ -148,16 +153,22 @@ class FlashCheckpointHelper:
         path: Optional[str] = None,
     ) -> str:
         """异步写入磁盘。rank0 负责等待所有 rank 落盘完成。"""
-        global_step, target_path = self._resolve_step_and_path(
+        global_step, target_path, checkpoint_path = self._resolve_step_and_path(
             epoch, step, path
         )
         self._checkpointer.save_checkpoint(
             global_step,
             state,
-            target_path,
+            checkpoint_path,
             storage_type=self._StorageType.DISK,
         )
-        self._write_latest_metadata(epoch, step, global_step, target_path)
+        self._write_latest_metadata(
+            epoch,
+            step,
+            global_step,
+            target_path,
+            default_layout=checkpoint_path == "",
+        )
         logger.info(
             "flash ckpt [disk] saved: step=%d path=%s", global_step, target_path
         )
@@ -184,24 +195,21 @@ class FlashCheckpointHelper:
 
     def _resolve_step_and_path(
         self, epoch: int, step: int, explicit_path: Optional[str]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         """生成 dlrover 需要的 (global_step, per-rank path)。
 
         - global_step：我们用 ``epoch * 1e9 + step`` 的线性组合保持单调递增，
           便于 dlrover engine 内部按 step 做排序/清理。
-        - 目录：``{root}/{epoch}_{step}`` 或 ``{root}/{epoch}``（step==0）。
-        - 文件：每 rank 一个 ``.pt``（dlrover 会在文件名后插入 rank，但 engine
-          也接受纯文件路径；这里按照 wall-x 风格直接给目录级 path，
-          dlrover 内部会拼 ``rank_<r>.pt``）。
+        - 默认不传自定义 path 给 dlrover，让它按 ``{root}/{global_step}/rank_<r>.pt``
+          管理多节点 shard 和 stage marker。
+        - 显式 path 仍然透传，供单机/自定义场景使用。
         """
+        global_step = self._compose_global_step(epoch, step)
         if explicit_path:
-            return (self._compose_global_step(epoch, step), explicit_path)
+            return (global_step, explicit_path, explicit_path)
 
-        if step == 0:
-            ckpt_dir = os.path.join(self._root, f"{epoch}")
-        else:
-            ckpt_dir = os.path.join(self._root, f"{epoch}_{step}")
-        return (self._compose_global_step(epoch, step), ckpt_dir)
+        ckpt_dir = os.path.join(self._root, str(global_step))
+        return (global_step, ckpt_dir, "")
 
     def _resolve_resume_path(self, resume_path: str) -> str:
         """返回 dlrover load_checkpoint 期望的具体文件路径。"""
@@ -211,6 +219,13 @@ class FlashCheckpointHelper:
         latest = self._read_latest_metadata()
         if not latest:
             return ""
+        if latest.get("layout") == "dlrover_default":
+            committed_step = self._read_committed_global_step()
+            if committed_step is None:
+                return ""
+            return self._normalize_resume_path(
+                os.path.join(self._root, str(committed_step))
+            )
         committed_step = self._read_committed_global_step()
         if committed_step is not None:
             checkpoints = latest.get("checkpoints", {})
@@ -233,19 +248,15 @@ class FlashCheckpointHelper:
         return path.endswith((".bin", ".pt", ".pth", ".safetensors"))
 
     def _rank_checkpoint_name(self) -> str:
-        rank = 0
-        if self._global_shard_num != 1:
-            try:
-                import torch.distributed as dist
-
-                if dist.is_available() and dist.is_initialized():
-                    rank = dist.get_rank()
-            except Exception:
-                rank = 0
-        return f"rank_{rank}.pt"
+        return "rank_0.pt"
 
     def _write_latest_metadata(
-        self, epoch: int, step: int, global_step: int, path: str
+        self,
+        epoch: int,
+        step: int,
+        global_step: int,
+        path: str,
+        default_layout: bool = False,
     ) -> None:
         latest_path = os.path.join(self._root, AXIS_LATEST_FILE_NAME)
         latest = self._read_latest_metadata()
@@ -255,6 +266,7 @@ class FlashCheckpointHelper:
         checkpoints[str(global_step)] = path
         metadata = {
             "version": 1,
+            "layout": "dlrover_default" if default_layout else "explicit_path",
             "epoch": int(epoch),
             "step": int(step),
             "global_step": int(global_step),
@@ -297,3 +309,21 @@ class FlashCheckpointHelper:
         # epoch 末传 step=0 的时候，保留当 epoch 最大值 + 1，避免和下个 epoch 的
         # 0-step 冲突；做法是把 epoch 做主序列、step 做从序列。
         return int(epoch) * 1_000_000_000 + int(step)
+
+    @staticmethod
+    def _infer_global_shard_num(shard_num_per_node: int) -> int:
+        """DDP full checkpoint 每个节点的 local shard rank 都会保存一份。"""
+        shard_num_per_node = max(1, int(shard_num_per_node))
+        try:
+            import torch.distributed as dist
+
+            if not (dist.is_available() and dist.is_initialized()):
+                return shard_num_per_node
+            world_size = dist.get_world_size()
+            local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "0") or "0")
+            if local_world_size <= 0:
+                local_world_size = world_size
+            node_num = max(1, world_size // local_world_size)
+            return max(shard_num_per_node, node_num * shard_num_per_node)
+        except Exception:
+            return shard_num_per_node

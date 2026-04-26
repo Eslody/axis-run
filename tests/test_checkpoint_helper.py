@@ -2,7 +2,7 @@
 
 使用 pytest monkeypatch 注入 fake DdpCheckpointer / StorageType，避免依赖
 真实 dlrover。重点验证：
-    - 目录规则 ``{root}/{epoch}_{step}``（step==0 时退化为 ``{root}/{epoch}``）。
+    - 默认使用 dlrover 自己的 ``{root}/{global_step}/rank_<rank>.pt`` 布局。
     - save_memory / save_disk 对应的 storage_type。
     - global_step 线性组合不会回退。
 """
@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import json
-import os
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -80,8 +81,8 @@ def test_save_memory_path_scheme(tmp_path: Path):
     out = h.save_memory(epoch=1, step=200, state={"a": 1})
     saved = _FakeCheckpointer.last_instance.saved[0]
     assert saved["storage_type"] == _FakeStorageType.MEMORY
-    assert saved["path"].endswith(os.path.join("1_200"))
-    assert out == saved["path"]
+    assert saved["path"] == ""
+    assert out == str(tmp_path / "1000000200")
 
 
 def test_save_disk_step_zero_scheme(tmp_path: Path):
@@ -89,12 +90,15 @@ def test_save_disk_step_zero_scheme(tmp_path: Path):
     h.save_disk(epoch=5, step=0, state={"a": 1})
     saved = _FakeCheckpointer.last_instance.saved[0]
     assert saved["storage_type"] == _FakeStorageType.DISK
-    assert saved["path"].endswith(os.path.join("5"))  # 纯 epoch 目录
+    assert saved["path"] == ""
     latest = json.loads((tmp_path / helper_mod.AXIS_LATEST_FILE_NAME).read_text())
+    assert latest["layout"] == "dlrover_default"
     assert latest["epoch"] == 5
     assert latest["step"] == 0
-    assert latest["path"] == saved["path"]
-    assert latest["checkpoints"][str(saved["step"])] == saved["path"]
+    assert latest["path"] == str(tmp_path / "5000000000")
+    assert latest["checkpoints"][str(saved["step"])] == str(
+        tmp_path / "5000000000"
+    )
 
 
 def test_explicit_path_is_respected(tmp_path: Path):
@@ -103,6 +107,8 @@ def test_explicit_path_is_respected(tmp_path: Path):
     h.save_disk(epoch=0, step=0, state={}, path=target)
     saved = _FakeCheckpointer.last_instance.saved[0]
     assert saved["path"] == target
+    latest = json.loads((tmp_path / helper_mod.AXIS_LATEST_FILE_NAME).read_text())
+    assert latest["layout"] == "explicit_path"
 
 
 def test_global_step_monotonic(tmp_path: Path):
@@ -153,8 +159,26 @@ def test_load_uses_axis_latest_with_committed_step(tmp_path: Path):
 
     assert h.load() == {"step": 18}
     assert _FakeCheckpointer.last_instance.loaded_from == str(
-        tmp_path / "0_18" / "rank_0.pt"
+        tmp_path / "18" / "rank_0.pt"
     )
+
+
+def test_infers_global_shard_num_from_distributed_world(
+    tmp_path: Path, monkeypatch
+):
+    fake_torch = types.ModuleType("torch")
+    fake_dist = types.ModuleType("torch.distributed")
+    fake_dist.is_available = lambda: True  # type: ignore[attr-defined]
+    fake_dist.is_initialized = lambda: True  # type: ignore[attr-defined]
+    fake_dist.get_world_size = lambda: 16  # type: ignore[attr-defined]
+    fake_torch.distributed = fake_dist  # type: ignore[attr-defined]
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)
+
+    h = helper_mod.FlashCheckpointHelper(root=str(tmp_path))
+    assert h._global_shard_num == 2
+    assert _FakeCheckpointer.last_instance.kwargs["global_shard_num"] == 2
 
 
 def test_load_explicit_directory_resume_path(tmp_path: Path):
