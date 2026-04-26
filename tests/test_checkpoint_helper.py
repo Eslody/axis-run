@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List
@@ -89,6 +90,11 @@ def test_save_disk_step_zero_scheme(tmp_path: Path):
     saved = _FakeCheckpointer.last_instance.saved[0]
     assert saved["storage_type"] == _FakeStorageType.DISK
     assert saved["path"].endswith(os.path.join("5"))  # 纯 epoch 目录
+    latest = json.loads((tmp_path / helper_mod.AXIS_LATEST_FILE_NAME).read_text())
+    assert latest["epoch"] == 5
+    assert latest["step"] == 0
+    assert latest["path"] == saved["path"]
+    assert latest["checkpoints"][str(saved["step"])] == saved["path"]
 
 
 def test_explicit_path_is_respected(tmp_path: Path):
@@ -126,6 +132,39 @@ def test_load_returns_state_dict(tmp_path: Path):
     h = helper_mod.FlashCheckpointHelper(root=str(tmp_path))
     _FakeCheckpointer.last_instance.load_return = {"model": "weights"}
     assert h.load() == {"model": "weights"}
+
+
+def test_load_unwraps_dlrover_model_states(tmp_path: Path):
+    h = helper_mod.FlashCheckpointHelper(root=str(tmp_path))
+    _FakeCheckpointer.last_instance.load_return = {
+        "model_states": {"model": "weights"}
+    }
+    assert h.load() == {"model": "weights"}
+
+
+def test_load_uses_axis_latest_with_committed_step(tmp_path: Path):
+    h = helper_mod.FlashCheckpointHelper(root=str(tmp_path))
+    h.save_disk(epoch=0, step=18, state={"a": 1})
+    (tmp_path / "dlrover_latest.txt").write_text("18")
+
+    _FakeCheckpointer.last_instance.load_return = {
+        "model_states": {"step": 18}
+    }
+
+    assert h.load() == {"step": 18}
+    assert _FakeCheckpointer.last_instance.loaded_from == str(
+        tmp_path / "0_18" / "rank_0.pt"
+    )
+
+
+def test_load_explicit_directory_resume_path(tmp_path: Path):
+    h = helper_mod.FlashCheckpointHelper(root=str(tmp_path))
+    resume_dir = tmp_path / "0_18"
+    resume_dir.mkdir()
+    h.load(resume_path=str(resume_dir))
+    assert _FakeCheckpointer.last_instance.loaded_from == str(
+        resume_dir / "rank_0.pt"
+    )
 
 
 def test_wait_latest_checkpoint_forwarded(tmp_path: Path):
