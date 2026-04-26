@@ -17,7 +17,6 @@ from abc import ABCMeta, abstractmethod
 from typing import List
 
 from dlrover.proto import brain_pb2
-from dlrover.python.brain.client import GlobalBrainClient
 from dlrover.python.common.comm import ModelInfo
 from dlrover.python.common.constants import ReporterType
 from dlrover.python.common.log import default_logger as logger
@@ -145,6 +144,8 @@ class LocalStatsReporter(StatsReporter, Singleton):
 
 class BrainReporter(StatsReporter, Singleton):
     def __init__(self, job_meta: JobMeta) -> None:
+        from dlrover.python.brain.client import GlobalBrainClient
+
         self._job_meta = job_meta
         self._brain_client = GlobalBrainClient.BRAIN_CLIENT
 
