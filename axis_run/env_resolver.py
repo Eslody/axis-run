@@ -26,6 +26,13 @@ DEFAULT_FAULT_CONFIG_DIR = "/etc/training-platform/fault"
 DEFAULT_AXIS_MASTER_PORT = 50001
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
 def _add_axis_arguments(parser: argparse.ArgumentParser) -> None:
     """在 parser 上追加 axis-run 专用参数。
 
@@ -87,6 +94,18 @@ def _add_axis_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "dlrover Master 的 job_name，用于日志区分。默认取 JOB_NAME 环境变量，"
             "未设置时 launcher 会生成一个带时间戳的缺省值。"
+        ),
+    )
+    group.add_argument(
+        "--save-at-breakpoint",
+        "--save_at_breakpoint",
+        dest="save_at_breakpoint",
+        action="store_true",
+        default=_env_bool("AXIS_SAVE_AT_BREAKPOINT", False),
+        help=(
+            "训练进程失败时，让 dlrover agent 将 shared memory 中的最新 "
+            "Flash Checkpoint 同步到持久化存储。也可通过 "
+            "AXIS_SAVE_AT_BREAKPOINT=true 开启。"
         ),
     )
 
