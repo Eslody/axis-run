@@ -40,6 +40,7 @@ def build_axis_config(
             axis-run-main 分支）。
     """
     # 延迟 import：允许单元测试在没有 dlrover 运行时依赖时直接 mock。
+    from axis_run.compat import create_elastic_launch_config
     from dlrover.python.common.constants import Accelerators
     from dlrover.python.elastic_agent.torch.training import (
         ElasticLaunchConfig,
@@ -48,7 +49,9 @@ def build_axis_config(
 
     base_config, cmd, cmd_args = config_from_args(args)
     logger.info("axis-run base LaunchConfig: %s", base_config.__dict__)
-    elastic_config = ElasticLaunchConfig(**base_config.__dict__)
+    elastic_config = create_elastic_launch_config(
+        ElasticLaunchConfig, base_config
+    )
 
     # ---- 透传 torchrun 扩展参数（与 dlrover 对齐）----
     elastic_config.setup_log(

@@ -58,7 +58,7 @@ class AxisMaster:
             SubprocessHandler,
         )
 
-        from dlrover.trainer.torch.utils import version_less_than_230
+        from axis_run.compat import create_subprocess_handler
 
         cmd = os.getenv("PYTHON_EXEC", sys.executable)
         args = (
@@ -75,11 +75,10 @@ class AxisMaster:
             "local",
         )
 
-        # torch < 2.3 的 SubprocessHandler 参数个数不同，与 dlrover 原实现保持一致。
-        if version_less_than_230():
-            self._handler = SubprocessHandler(cmd, args, {}, "", "")
-        else:
-            self._handler = SubprocessHandler(cmd, args, {}, "", "", 0)
+        # PyTorch elastic 内部 API 会增删构造参数；用 inspect 适配，见 axis_run.compat。
+        self._handler = create_subprocess_handler(
+            SubprocessHandler, cmd, args, {}, "", ""
+        )
 
         if not self._wait_ready(self._port, self._ready_timeout):
             raise MasterUnavailableError(

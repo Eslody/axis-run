@@ -12,16 +12,13 @@
 # limitations under the License.
 
 from abc import ABCMeta, abstractmethod
-from typing import Dict
+from typing import Dict, Optional, TYPE_CHECKING
 
-from dlrover.python.common.constants import TrainingExceptionLevel
+from dlrover.python.common.constants import PlatformType, TrainingExceptionLevel
 from dlrover.python.common.event.reporter import get_event_reporter
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node, NodeEvent
 from dlrover.python.diagnosis.common.diagnosis_action import DiagnosisAction
-from dlrover.python.master.hyperparams.simple_strategy_generator import (
-    SimpleStrategyGenerator,
-)
 from dlrover.python.master.monitor.perf_monitor import PerfMonitor
 from dlrover.python.master.node.job_context import get_job_context
 from dlrover.python.master.node.training_node import (
@@ -30,7 +27,11 @@ from dlrover.python.master.node.training_node import (
 )
 from dlrover.python.master.resource.job import JobResource
 from dlrover.python.scheduler.job import JobArgs
-from dlrover.python.scheduler.kubernetes import k8sClient
+
+if TYPE_CHECKING:
+    from dlrover.python.master.hyperparams.simple_strategy_generator import (
+        SimpleStrategyGenerator,
+    )
 
 
 class JobManager(metaclass=ABCMeta):
@@ -46,10 +47,15 @@ class JobManager(metaclass=ABCMeta):
     ):
         self._job_resource = JobResource()
         self._job_args = job_args
-        self._k8s_client = k8sClient.singleton_instance(job_args.namespace)
-        self._job_strategy_generator: SimpleStrategyGenerator = (
-            SimpleStrategyGenerator(self._job_args.job_uuid)
-        )
+        self._k8s_client = None
+        if job_args.platform in (
+            PlatformType.KUBERNETES,
+            PlatformType.PY_KUBERNETES,
+        ):
+            from dlrover.python.scheduler.kubernetes import k8sClient
+
+            self._k8s_client = k8sClient.singleton_instance(job_args.namespace)
+        self._job_strategy_generator: Optional["SimpleStrategyGenerator"] = None
         self._perf_monitor: PerfMonitor = perf_monitor
         self._event_reporter = get_event_reporter()
 
@@ -63,6 +69,17 @@ class JobManager(metaclass=ABCMeta):
     @property
     def job_uid(self):
         return self._job_args.job_uuid
+
+    def _get_job_strategy_generator(self) -> "SimpleStrategyGenerator":
+        if self._job_strategy_generator is None:
+            from dlrover.python.master.hyperparams.simple_strategy_generator import (
+                SimpleStrategyGenerator,
+            )
+
+            self._job_strategy_generator = SimpleStrategyGenerator(
+                self._job_args.job_uuid
+            )
+        return self._job_strategy_generator
 
     @abstractmethod
     def start(self):

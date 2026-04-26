@@ -6,6 +6,7 @@
 - **节点级重建**（`severity=fatal`）：通过 `RELAUNCH_WORKER` 让 JobSet 重新调度当前 Pod。
 - **Flash Checkpoint**：封装 `dlrover` 的 `DdpCheckpointer`，提供 `save_memory` / `save_disk` 两种写入模式，默认目录由 `AXIS_CKPT_DIR` 指定。
 - **rank 0 本地 master**：rank 0 Pod 上内嵌 `LocalJobMaster` 子进程，其他 rank 通过 `AXIS_MASTER_PORT`（默认 `50001`）连接，不引入独立 Deployment / Operator。
+- **不依赖 Kubernetes Python client**：`axis-run` 只跑 dlrover local master / elastic agent；Pod 重建、调度、ConfigMap 写入等 Kubernetes 操作全部由 training-platform / tp-plugin 平台层完成。
 
 本仓库把 [dlrover](https://github.com/intelligent-machine-learning/dlrover) 的源码整体 vendor 进来，并打了 3 处补丁（见下方 **3 处二开**）。`pip install axis-run` 会同时把 `axis_run` 与 `dlrover` 两个命名空间装入环境。
 
@@ -20,6 +21,7 @@ axis-run/
 │   ├── diagnosis/          # FaultConfigFailover / FaultConfigDiagnostician
 │   ├── config.py           # 参数解析（torchrun 风格）
 │   ├── env_resolver.py     # 从环境变量解析节点拓扑 / rank
+│   ├── compat.py           # PyTorch elastic / ElasticLaunchConfig 签名兼容层
 │   ├── launcher.py         # 主启动入口，串起 master / agent / diagnostician
 │   ├── main.py             # pip console_script 入口
 │   └── master.py           # LocalJobMaster 子进程守护
@@ -47,7 +49,7 @@ python -m venv .venv && source .venv/bin/activate
 # 装编辑态 + 测试依赖（dlrover 及其依赖会随 axis-run 一并安装）
 pip install -e '.[test]'
 
-# 跑单测（预期 26 passed，tests 里不依赖 dlrover runtime，使用 stub）
+# 跑单测（含 compat 层用例；tests 里不依赖真实 dlrover runtime，使用 stub）
 pytest tests -q
 
 # CLI 自检（需要本地已装 torch；axis-run 复用 torch.distributed.run 的参数解析）
@@ -86,6 +88,22 @@ axis-run \
 | `JOB_NAME` | _（由 kubeflow-trainer 注入）_ | Diagnostician 报告日志用 |
 | `NODE_NAME` | _（由 Downward API 注入）_ | 用于匹配 `job-fault-configmap/nodes.json` 当前节点 |
 | `PET_*` | 由 JobSet 注入 | 与 `torchrun` 完全一致，不做改动 |
+
+### 2.4 版本兼容策略
+
+`axis-run` 复用了 **PyTorch Elastic** 与 **torch.distributed.run** 的部分内部 API（例如 rank0 拉起 dlrover master 时使用的 `SubprocessHandler`，以及把 `config_from_args` 的结果塞进 DLRover 的 `ElasticLaunchConfig`）。这些 API 在不同 `torch` 小版本间可能增删构造参数。
+
+本仓库用 [`axis_run/compat.py`](./axis_run/compat.py) 在运行时通过 `inspect.signature` 适配，而不是仅靠 `torch.__version__` 字符串分支：
+
+- **`create_subprocess_handler`**：兼容 5 / 6 / 7+ 参数的 `SubprocessHandler`（含新版 `numa_options`）。
+- **`create_elastic_launch_config` / `filter_kwargs_for_ctor`**：构造 `ElasticLaunchConfig` 时过滤掉 torch `LaunchConfig` 里 DLRover 尚未识别的字段；若目标类带 `**kwargs` 则原样透传。
+
+**部署建议**
+
+- **默认不要把 `torch` 写进 axis-run 的安装依赖**：训练镜像已固定 PyTorch/CUDA 时，只执行 `pip install axis-run` 或 `pip install -e .`，避免安装 axis-run 时顺带升级 torch。
+- **默认不要安装 `kubernetes` Python 包**：axis-run 的 runtime 不直接调用 K8s API；K8s 行为由平台层控制。vendored DLRover 里的 Kubernetes 模块只保留给上游兼容，不在 `platform=local` 路径加载。
+- **`pip install '.[torch]'`** 仅适合本机做 `axis-run --help` / 冒烟，**不要用于生产镜像**（会拉取大量 CUDA 相关 wheel）。
+- **发布与验收**：按「axis-run 的 git tag + 训练镜像 torch 版本」做组合登记；升级 torch 后至少跑 `pytest tests -q`、容器内 `axis-run --help`、以及你关心的断点续训 / 单机 elastic 用例（见 [`docs/INTEGRATION_TEST.md`](./docs/INTEGRATION_TEST.md) 的 Phase 0）。
 
 ---
 
@@ -140,7 +158,7 @@ grep -rn "set_target_worker_num(worker_count)" dlrover
 ```bash
 pip install -e '.[test]'
 pytest tests -q
-# 预期：26 passed
+# 预期：32 passed（含 tests/test_compat.py 兼容层用例）
 ```
 
 测试不依赖真实 `dlrover` runtime（用 monkeypatch 桩掉 `MasterClient` 等），方便在没有 GPU / K8s 的机器上做 CI。
