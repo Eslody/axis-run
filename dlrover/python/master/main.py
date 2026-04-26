@@ -12,8 +12,6 @@
 # limitations under the License.
 
 import os
-
-from dlrover.dashboard.integrate_with_master import add_dashboard_to_master
 from dlrover.python.common.constants import (
     Accelerators,
     DistributionStrategy,
@@ -104,7 +102,10 @@ def run(args):
         "port": _dlrover_context.dashboard_port,
     }
     logger.info(f"Dashboard config: {dashboard_config}")
-    add_dashboard_to_master(master, dashboard_config)
+    if dashboard_config["enable"]:
+        from dlrover.dashboard.integrate_with_master import add_dashboard_to_master
+
+        add_dashboard_to_master(master, dashboard_config)
 
     return master.run()
 

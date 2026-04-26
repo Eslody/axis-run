@@ -1452,7 +1452,7 @@ class DistributedJobManager(JobManager):
             self._job_optimizer.set_node_unit(node_unit)
 
     def get_opt_strategy(self) -> ParallelConfig:
-        strategy = self._job_strategy_generator.generate_opt_strategy()
+        strategy = self._get_job_strategy_generator().generate_opt_strategy()
         return strategy
 
     def update_node_paral_config(self, node_type, node_id, paral_config):
