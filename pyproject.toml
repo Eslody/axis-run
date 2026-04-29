@@ -30,6 +30,8 @@ dependencies = [
     "packaging",
     "grpcio",
     "protobuf",
+    "transformers",
+    "safetensors",
 ]
 
 # axis-run 仅使用 dlrover local master；Kubernetes 操作由 training-platform 平台层完成。
