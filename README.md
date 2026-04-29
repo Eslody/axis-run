@@ -86,7 +86,8 @@ axis-run \
 | `AXIS_FAULT_CONFIG_DIR` | `/etc/training-platform/fault` | 挂载 `job-fault-configmap` 的目录 |
 | `AXIS_CKPT_DIR` | _（无，可选）_ | `FlashCheckpointHelper` 默认保存根目录 |
 | `JOB_NAME` | _（由 kubeflow-trainer 注入）_ | Diagnostician 报告日志用 |
-| `NODE_NAME` | _（由 Downward API 注入）_ | 用于匹配 `job-fault-configmap/nodes.json` 当前节点 |
+| `POD_NAME` | _（由 Downward API 注入）_ | 用于匹配 `job-fault-configmap/fault.json` 中的当前 Pod |
+| `NODE_NAME` | _（由 Downward API 注入）_ | Diagnostician 日志与 fault.json 节点信息排查用 |
 | `PET_*` | 由 JobSet 注入 | 与 `torchrun` 完全一致，不做改动 |
 
 ### 2.4 版本兼容策略
@@ -111,11 +112,15 @@ axis-run \
 
 上游 kubeflow-trainer 的 torch 插件会在 TrainJob 上：
 
-1. 注入上述 `AXIS_*` / `JOB_NAME` / `NODE_NAME` 环境变量；
+1. 注入上述 `AXIS_*` / `JOB_NAME` / `POD_NAME` / `NODE_NAME` 环境变量；
 2. 把 `job-fault-<TrainJob.Name>` ConfigMap 挂到 `AXIS_FAULT_CONFIG_DIR`；
 3. 保留所有原 `PET_*` 变量，因此 `axis-run` 命令行参数与 `torchrun` 保持一致。
 
-Snapshot-agent / fault-restart-controller 负责**写入** `job-fault-configmap`。`axis-run` 只**读取**它，由 `FaultConfigFailover`（被动决策）和 `FaultConfigDiagnostician`（主动轮询）共同消费：
+Snapshot-agent / fault-restart-controller 负责**写入** `job-fault-configmap/fault.json`。`axis-run` 只**读取**它，由 `FaultConfigFailover`（被动决策）和 `FaultConfigDiagnostician`（主动轮询）共同消费：
+
+- `overall_severity=ok` → 直接返回 ok，不下钻 `jobs.joblist`；
+- `overall_severity=warn|fatal` → 在 `jobs.joblist[0].statuses[0].pods[]` 中按 `POD_NAME` 匹配，再通过 `node.healthyID` 得到当前 Pod 严重度；
+- 当前 Pod 不在稀疏 `pods` 列表中 → 视为 ok。
 
 - `warn` → `FaultConfigFailover` 返回 `NORMAL_FAILOVER` → agent 只重启 worker 进程；
 - `fatal` → `FaultConfigDiagnostician` 主动 enqueue `RELAUNCH_WORKER` → JobSet 重建 Pod。

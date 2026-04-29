@@ -3,8 +3,9 @@
 本 Diagnostician 通过 ``DLROVER_EXTENSION_DIAGNOSTICIAN`` 注册到 dlrover
 ``DiagnosisAgent`` 的周期调度中（``time_interval=30s``）。每次触发 diagnose：
 
-    1) observe：读 ``<fault_config_dir>/nodes.json``，若发现本节点 severity=fatal，
-       返回非空 Observation。否则返回 None（NoAction）。
+    1) observe：读取 ``<fault_config_dir>/fault.json`` 顶层 ``overall_severity``；
+       ok 时短路，非 ok 时通过 ``POD_NAME`` 匹配稀疏 ``pods`` 条目。若当前
+       Pod severity=fatal，返回非空 Observation。否则返回 None（NoAction）。
     2) resolve：产出 ``NodeAction(action_type=RELAUNCH_WORKER)``，上报给
        dlrover action queue；agent 侧 ``_invoke_run`` 下一轮会 stop_workers 并
        把 WorkerState 置为 FAILED，从而退出进程、让 JobSet 换 Pod。
@@ -93,7 +94,7 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
         node_rank: Optional[int] = None,
     ) -> None:
         super().__init__()
-        # 复用 FaultConfigFailover 的 nodes.json 读取逻辑，避免在两处重复解析。
+        # 复用 FaultConfigFailover 的 job-fault 读取逻辑，避免在两处重复解析。
         self._reader = FaultConfigFailover(
             fault_config_dir=fault_config_dir, node_name=node_name
         )
@@ -108,12 +109,13 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
             self._node_rank = 0
 
     def observe(self, **_kwargs) -> Optional[DiagnosisObservation]:  # type: ignore[override]
-        """每轮读本节点 severity；fatal 时返回带节点信息的 Observation。"""
-        severity = self._reader.read_node_severity()
+        """每轮读本 Pod severity；fatal 时返回带 Pod/节点信息的 Observation。"""
+        severity = self._reader.read_severity()
         if severity != SEVERITY_FATAL:
             return None
 
         extra = {
+            "pod_name": self._reader.pod_name,
             "node_name": self._reader.node_name,
             "severity": severity,
             "fault_config_dir": self._reader.fault_config_dir,
@@ -133,7 +135,8 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
 
         extras = problem.extra_infos or {}
         reason = (
-            f"AxisFaultConfig: node {extras.get('node_name', 'unknown')} "
+            f"AxisFaultConfig: pod {extras.get('pod_name', 'unknown')} "
+            f"node {extras.get('node_name', 'unknown')} "
             f"severity=fatal; requesting RELAUNCH_WORKER"
         )
         logger.warning(reason)
