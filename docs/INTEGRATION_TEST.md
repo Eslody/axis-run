@@ -88,7 +88,7 @@ kubectl apply -f two-node-trainjob.yaml
 ```bash
 # 模拟 snapshot-agent 上报 RDMA device removed，或直接写 CM。
 kubectl -n <ns> create configmap job-fault-<trainjob-name> \
-    --from-literal=nodes.json='[{"node_name":"<rank1-node>","severity":"fatal"}]' \
+    --from-literal=fault.json='{"schema":"v3","overall_severity":"fatal","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","healthyID":500,"resources":[{"type":"RDMA","UUID":"","healthyID":500,"unreachableGPUS":[],"description":"mock fatal fault"}]}}]}]}]}}' \
     --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -108,7 +108,7 @@ kubectl -n <ns> create configmap job-fault-<trainjob-name> \
 
 ```bash
 kubectl -n <ns> create configmap job-fault-<trainjob-name> \
-    --from-literal=nodes.json='[{"node_name":"<rank1-node>","severity":"warn"}]' \
+    --from-literal=fault.json='{"schema":"v3","overall_severity":"warn","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","healthyID":400,"resources":[{"type":"GPU","UUID":"GPU-mock","healthyID":400,"unreachableGPUS":[],"description":"mock warn fault"}]}}]}]}]}}' \
     --dry-run=client -o yaml | kubectl apply -f -
 
 # 手动 kill -9 rank 1 的 trainer 进程以触发 failover。

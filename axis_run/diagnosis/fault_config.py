@@ -3,9 +3,9 @@
 本 Diagnostician 通过 ``DLROVER_EXTENSION_DIAGNOSTICIAN`` 注册到 dlrover
 ``DiagnosisAgent`` 的周期调度中（``time_interval=30s``）。每次触发 diagnose：
 
-    1) observe：优先读 ``<fault_config_dir>/pods.json``，通过 ``POD_NAME`` 匹配
-       当前 Pod；缺失时回退 ``nodes.json`` + ``NODE_NAME``。若发现 severity=fatal，
-       返回非空 Observation。否则返回 None（NoAction）。
+    1) observe：读取 ``<fault_config_dir>/fault.json`` 顶层 ``overall_severity``；
+       ok 时短路，非 ok 时通过 ``POD_NAME`` 匹配稀疏 ``pods`` 条目。若当前
+       Pod severity=fatal，返回非空 Observation。否则返回 None（NoAction）。
     2) resolve：产出 ``NodeAction(action_type=RELAUNCH_WORKER)``，上报给
        dlrover action queue；agent 侧 ``_invoke_run`` 下一轮会 stop_workers 并
        把 WorkerState 置为 FAILED，从而退出进程、让 JobSet 换 Pod。

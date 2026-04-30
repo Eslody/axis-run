@@ -47,8 +47,8 @@ def _add_axis_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=os.getenv("AXIS_FAULT_CONFIG_DIR", DEFAULT_FAULT_CONFIG_DIR),
         help=(
-            "job-fault-* ConfigMap 挂载到 Pod 的目录，内含 summary.json / "
-            "nodes.json。默认 /etc/training-platform/fault。"
+            "job-fault-* ConfigMap 挂载到 Pod 的目录，内含 fault.json。"
+            "默认 /etc/training-platform/fault。"
         ),
     )
     group.add_argument(

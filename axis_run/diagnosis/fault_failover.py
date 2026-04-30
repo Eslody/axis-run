@@ -11,10 +11,10 @@ JobSet 重建 Pod，从磁盘 checkpoint 恢复）。
     severity == "fatal"  -> NODE_FAILOVER
     severity in ("ok", "warn", 缺省) -> NORMAL_FAILOVER
 
-读取源优先级：
+读取源：
 
-    1) ``<fault_config_dir>/pods.json``：通过 ``POD_NAME`` 匹配当前 Pod 条目。
-    2) ``<fault_config_dir>/nodes.json``：兼容旧版，通过 ``NODE_NAME`` 匹配节点条目。
+    ``<fault_config_dir>/fault.json``：先读取顶层 ``overall_severity``，ok 时直接
+    返回；非 ok 时再按 ``jobs.joblist[0].statuses[0].pods[]`` 匹配当前 Pod。
 
 若 configmap 缺失或读取失败，一律降级为 ``NORMAL_FAILOVER``（不强制换节点，
 避免 configmap 问题放大故障面）。
@@ -33,6 +33,18 @@ SEVERITY_OK = "ok"
 SEVERITY_WARN = "warn"
 SEVERITY_FATAL = "fatal"
 _DEFAULT_FAULT_CONFIG_DIR = "/etc/training-platform/fault"
+
+
+def _severity_from_healthy_id(value) -> str:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return SEVERITY_OK
+    if n >= 500:
+        return SEVERITY_FATAL
+    if n >= 400:
+        return SEVERITY_WARN
+    return SEVERITY_OK
 
 
 try:  # 运行期（用户训练镜像里）一定有 dlrover。
@@ -99,52 +111,53 @@ class FaultConfigFailover(_DynamicAgentFailoverExtension):  # type: ignore[misc]
         return _FailoverStrategy.NORMAL_FAILOVER
 
     def read_severity(self) -> str:
-        """优先读取 pod 级 severity，缺失时回退旧版 node 级 severity。"""
-        pod_severity = self.read_pod_severity()
-        if pod_severity is not None:
-            return pod_severity
-        return self.read_node_severity()
+        """读取 fault.json；顶层 ok 时短路，非 ok 时再匹配当前 Pod。"""
+        doc = self._load_fault_doc()
+        if doc is None:
+            return SEVERITY_OK
 
-    def read_pod_severity(self) -> Optional[str]:
-        """读取 pods.json 中本 Pod severity；文件或匹配缺失时返回 None。"""
+        overall = str(doc.get("overall_severity") or SEVERITY_OK).lower()
+        if overall == SEVERITY_OK:
+            return SEVERITY_OK
         if not self._pod_name:
-            logger.debug("POD_NAME not set; skip pods.json")
-            return None
+            return overall
 
-        pods_file = os.path.join(self._dir, "pods.json")
-        entries = self._load_entries(pods_file)
-        if entries is None:
-            return None
-
-        for entry in entries:
-            if not isinstance(entry, dict):
+        jobs = (doc.get("jobs") or {}).get("joblist") or []
+        if not jobs or not isinstance(jobs[0], dict):
+            return SEVERITY_OK
+        statuses = jobs[0].get("statuses") or []
+        if not statuses or not isinstance(statuses[0], dict):
+            return SEVERITY_OK
+        for entry in statuses[0].get("pods") or []:
+            if not isinstance(entry, dict) or entry.get("name") != self._pod_name:
                 continue
-            if entry.get("pod_name") == self._pod_name:
-                sev = entry.get("severity", SEVERITY_OK) or SEVERITY_OK
-                return str(sev).lower()
+            node = entry.get("node") or {}
+            if not isinstance(node, dict):
+                return SEVERITY_OK
+            return _severity_from_healthy_id(node.get("healthyID"))
+
+        # sparse pods 列表中没有本 Pod，按 schema 语义表示本 Pod 所在节点无异常。
         return SEVERITY_OK
 
-    def read_node_severity(self) -> str:
-        """读取 nodes.json 中本节点 severity。异常统一返回 "ok"。
+    def _load_fault_doc(self) -> Optional[dict]:
+        path = os.path.join(self._dir, "fault.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("failed to read %s: %s; ignore this file", path, e)
+            return None
 
-        保留为 public 方法，兼容旧测试和旧版 job-fault ConfigMap。
-        """
-        if not self._node_name:
-            logger.debug("NODE_NAME not set; severity defaults to ok")
-            return SEVERITY_OK
-
-        nodes_file = os.path.join(self._dir, "nodes.json")
-        entries = self._load_entries(nodes_file)
-        if entries is None:
-            return SEVERITY_OK
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("node_name") == self._node_name:
-                sev = entry.get("severity", SEVERITY_OK) or SEVERITY_OK
-                return str(sev).lower()
-        return SEVERITY_OK
+        if not isinstance(doc, dict):
+            logger.warning(
+                "unexpected %s structure: %r; ignore this file",
+                os.path.basename(path),
+                type(doc).__name__,
+            )
+            return None
+        return doc
 
     def _load_entries(self, path: str) -> Optional[list]:
         if not os.path.exists(path):
