@@ -9,7 +9,7 @@ JobSet 重建 Pod，从磁盘 checkpoint 恢复）。
 分级规则（见 plan 第 3.6 节）：
 
     severity == "fatal"  -> NODE_FAILOVER
-    severity in ("ok", "warn", 缺省) -> NORMAL_FAILOVER
+    severity in ("ok", "warn", "reset", 缺省) -> NORMAL_FAILOVER
 
 读取源：
 
@@ -31,19 +31,15 @@ logger = logging.getLogger(__name__)
 
 SEVERITY_OK = "ok"
 SEVERITY_WARN = "warn"
+SEVERITY_RESET = "reset"
 SEVERITY_FATAL = "fatal"
 _DEFAULT_FAULT_CONFIG_DIR = "/etc/training-platform/fault"
 
 
-def _severity_from_healthy_id(value) -> str:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return SEVERITY_OK
-    if n >= 500:
-        return SEVERITY_FATAL
-    if n >= 400:
-        return SEVERITY_WARN
+def _normalize_severity(value) -> str:
+    severity = str(value or SEVERITY_OK).lower()
+    if severity in {SEVERITY_OK, SEVERITY_WARN, SEVERITY_RESET, SEVERITY_FATAL}:
+        return severity
     return SEVERITY_OK
 
 
@@ -100,7 +96,7 @@ class FaultConfigFailover(_DynamicAgentFailoverExtension):  # type: ignore[misc]
             )
             return _FailoverStrategy.NODE_FAILOVER
 
-        # ok / warn / 缺省：都走 NORMAL_FAILOVER。
+        # ok / warn / reset / 缺省：都走 NORMAL_FAILOVER。
         # 注：保留进程重启是保护 SHM checkpoint + avoid 换节点带来的 rdzv/store 重建。
         logger.info(
             "FaultConfigFailover: pod=%s node=%s severity=%s -> NORMAL_FAILOVER",
@@ -116,7 +112,7 @@ class FaultConfigFailover(_DynamicAgentFailoverExtension):  # type: ignore[misc]
         if doc is None:
             return SEVERITY_OK
 
-        overall = str(doc.get("overall_severity") or SEVERITY_OK).lower()
+        overall = _normalize_severity(doc.get("overall_severity"))
         if overall == SEVERITY_OK:
             return SEVERITY_OK
         if not self._pod_name:
@@ -134,7 +130,7 @@ class FaultConfigFailover(_DynamicAgentFailoverExtension):  # type: ignore[misc]
             node = entry.get("node") or {}
             if not isinstance(node, dict):
                 return SEVERITY_OK
-            return _severity_from_healthy_id(node.get("healthyID"))
+            return _normalize_severity(node.get("severity"))
 
         # sparse pods 列表中没有本 Pod，按 schema 语义表示本 Pod 所在节点无异常。
         return SEVERITY_OK

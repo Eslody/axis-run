@@ -88,7 +88,7 @@ kubectl apply -f two-node-trainjob.yaml
 ```bash
 # 模拟 snapshot-agent 上报 RDMA device removed，或直接写 CM。
 kubectl -n <ns> create configmap job-fault-<trainjob-name> \
-    --from-literal=fault.json='{"schema":"v3","overall_severity":"fatal","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","healthyID":500,"resources":[{"type":"RDMA","UUID":"","healthyID":500,"unreachableGPUS":[],"description":"mock fatal fault"}]}}]}]}]}}' \
+    --from-literal=fault.json='{"schema":"v4","overall_severity":"fatal","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","severity":"fatal","ready":true,"allocatable_match":true,"resources":[{"type":"RDMA","UUID":"mlx5_0:1","device":"mlx5_0","port":1,"severity":"fatal","description":"mock fatal fault","faults":[{"type":"linkDown","level":500,"count":1}]}]}}]}]}]}}' \
     --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -108,7 +108,7 @@ kubectl -n <ns> create configmap job-fault-<trainjob-name> \
 
 ```bash
 kubectl -n <ns> create configmap job-fault-<trainjob-name> \
-    --from-literal=fault.json='{"schema":"v3","overall_severity":"warn","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","healthyID":400,"resources":[{"type":"GPU","UUID":"GPU-mock","healthyID":400,"unreachableGPUS":[],"description":"mock warn fault"}]}}]}]}]}}' \
+    --from-literal=fault.json='{"schema":"v4","overall_severity":"warn","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","severity":"warn","ready":true,"allocatable_match":true,"resources":[{"type":"GPU","UUID":"GPU-mock","index":0,"severity":"warn","description":"mock warn fault","faults":[{"type":"pciDownGrade","level":200,"count":1}]}]}}]}]}]}}' \
     --dry-run=client -o yaml | kubectl apply -f -
 
 # 手动 kill -9 rank 1 的 trainer 进程以触发 failover。
@@ -121,6 +121,22 @@ kubectl exec <rank1-pod> -c node -- bash -c "pkill -9 -f 'train.py'"
 - trainer 容器内进程被 dlrover agent 重新拉起。
 - `FlashCheckpointHelper.save_memory(...)` 写入的 SHM ckpt 能被新进程直接读出
   （日志里出现 `flash ckpt [memory] saved` 后重启进程仍能 `helper.load()`）。
+
+## Phase 4.5: 故障注入 (reset) → 延迟进程级重启
+
+目标：severity=reset 时，axis-run 主动触发本地 `RESTART_WORKER`，默认等待 300s 后重启 worker，不换 Pod。
+
+```bash
+kubectl -n <ns> create configmap job-fault-<trainjob-name> \
+    --from-literal=fault.json='{"schema":"v4","overall_severity":"reset","updated_at":1714000000,"jobs":{"total_restart_times":3,"left_restart_times":2,"final_completion_time":0,"joblist":[{"namespace":"<ns>","name":"<trainjob-name>","retart_cnt":1,"create_time":1713999900,"completion_time":0,"abnormalnodes":["<rank1-node>"],"statuses":[{"timestamp":1714000000,"status":"Running","pods":[{"name":"<rank1-pod>","status":"Running","node":{"name":"<rank1-node>","severity":"reset","ready":true,"allocatable_match":true,"resources":[{"type":"GPU","UUID":"GPU-mock","index":0,"severity":"reset","description":"mock reset fault","faults":[{"xid":94,"type":"containedEccError","level":400,"count":1}]}]}}]}]}]}}' \
+    --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**验证点**
+
+- 30s 内 rank 1 Pod 日志出现 `AxisFaultConfig... requesting restart_worker`。
+- Pod UID 不变化；worker 在约 300s 后重启。
+- 不触发 JobSet 换节点；SHM checkpoint 仍可用于进程级恢复。
 
 ## Phase 5: Flash Checkpoint 恢复
 
