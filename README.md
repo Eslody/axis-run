@@ -2,7 +2,7 @@
 
 `axis-run` 是一个与 `torchrun` 命令行完全兼容的分布式训练启动器，在 `dlrover` 的 elastic agent 之上叠加了一套基于 `job-fault-configmap` 的分级容错能力：
 
-- **进程级重启**（`severity=warn`）：只重启本机 worker，不换节点，保留内存 / NCCL 连接。
+- **进程级重启**（`severity=reset`）：延迟 300s 后只重启本机 worker，不换节点，给热复位故障留恢复窗口。
 - **节点级重建**（`severity=fatal`）：通过 `RELAUNCH_WORKER` 让 JobSet 重新调度当前 Pod。
 - **Flash Checkpoint**：封装 `dlrover` 的 `DdpCheckpointer`，提供 `save_memory` / `save_disk` 两种写入模式，默认目录由 `AXIS_CKPT_DIR` 指定。
 - **rank 0 本地 master**：rank 0 Pod 上内嵌 `LocalJobMaster` 子进程，其他 rank 通过 `AXIS_MASTER_PORT`（默认 `50001`）连接，不引入独立 Deployment / Operator。
@@ -119,11 +119,17 @@ axis-run \
 Snapshot-agent / fault-restart-controller 负责**写入** `job-fault-configmap/fault.json`。`axis-run` 只**读取**它，由 `FaultConfigFailover`（被动决策）和 `FaultConfigDiagnostician`（主动轮询）共同消费：
 
 - `overall_severity=ok` → 直接返回 ok，不下钻 `jobs.joblist`；
-- `overall_severity=warn|fatal` → 在 `jobs.joblist[0].statuses[0].pods[]` 中按 `POD_NAME` 匹配，再通过 `node.healthyID` 得到当前 Pod 严重度；
+- `overall_severity=warn|reset|fatal` → 在 `jobs.joblist[0].statuses[0].pods[]` 中按 `POD_NAME` 匹配，再通过 `node.severity` 得到当前 Pod 严重度；
 - 当前 Pod 不在稀疏 `pods` 列表中 → 视为 ok。
 
-- `warn` → `FaultConfigFailover` 返回 `NORMAL_FAILOVER` → agent 只重启 worker 进程；
-- `fatal` → `FaultConfigDiagnostician` 主动 enqueue `RELAUNCH_WORKER` → JobSet 重建 Pod。
+四档语义：
+
+| severity | axis-run 行为 |
+| --- | --- |
+| `ok` | 不动作 |
+| `warn` | 仅记录；如果训练进程自身失败，`FaultConfigFailover` 返回 `NORMAL_FAILOVER` |
+| `reset` | `FaultConfigDiagnostician` enqueue 本地 `RESTART_WORKER`，默认 300s 后重启 worker 进程 |
+| `fatal` | `FaultConfigDiagnostician` enqueue 本地 `RELAUNCH_WORKER`，让 JobSet 重建 Pod |
 
 详见 [`docs/INTEGRATION_TEST.md`](./docs/INTEGRATION_TEST.md)。
 

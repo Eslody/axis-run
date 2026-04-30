@@ -12,6 +12,8 @@ from pathlib import Path
 
 from axis_run.diagnosis.fault_config import (
     FAULT_OBSERVATION_FATAL,
+    FAULT_OBSERVATION_RESET,
+    DEFAULT_RESET_WAIT_SECONDS,
     FaultConfigDiagnostician,
     DiagnosisActionType,
     NoAction,
@@ -21,7 +23,7 @@ from axis_run.diagnosis.fault_config import (
 
 def _fault_doc(overall: str, pods: list[dict] | None = None) -> dict:
     return {
-        "schema": "v3",
+        "schema": "v4",
         "overall_severity": overall,
         "updated_at": 1714000000,
         "jobs": {
@@ -49,13 +51,13 @@ def _fault_doc(overall: str, pods: list[dict] | None = None) -> dict:
     }
 
 
-def _pod(name: str, healthy_id: int) -> dict:
+def _pod(name: str, severity: str) -> dict:
     return {
         "name": name,
         "status": "Running",
         "node": {
             "name": "n1",
-            "healthyID": healthy_id,
+            "severity": severity,
             "resources": [],
         },
     }
@@ -66,7 +68,7 @@ def _write_fault(tmpdir: Path, doc: dict):
 
 
 def test_observe_none_when_ok(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc("ok", [_pod("p0", 500)]))
+    _write_fault(tmp_path, _fault_doc("ok", [_pod("p0", "fatal")]))
     d = FaultConfigDiagnostician(
         fault_config_dir=str(tmp_path), node_name="n1", node_rank=2
     )
@@ -74,7 +76,7 @@ def test_observe_none_when_ok(tmp_path: Path):
 
 
 def test_observe_none_when_warn(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc("warn", [_pod("p0", 400)]))
+    _write_fault(tmp_path, _fault_doc("warn", [_pod("p0", "warn")]))
     d = FaultConfigDiagnostician(
         fault_config_dir=str(tmp_path), node_name="n1", node_rank=0
     )
@@ -83,7 +85,7 @@ def test_observe_none_when_warn(tmp_path: Path):
 
 def test_observe_fatal(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("POD_NAME", "p0")
-    _write_fault(tmp_path, _fault_doc("fatal", [_pod("p0", 500)]))
+    _write_fault(tmp_path, _fault_doc("fatal", [_pod("p0", "fatal")]))
     d = FaultConfigDiagnostician(
         fault_config_dir=str(tmp_path), node_name="n1", node_rank=3
     )
@@ -95,9 +97,23 @@ def test_observe_fatal(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("POD_NAME", raising=False)
 
 
+def test_observe_reset(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("POD_NAME", "p0")
+    _write_fault(tmp_path, _fault_doc("reset", [_pod("p0", "reset")]))
+    d = FaultConfigDiagnostician(
+        fault_config_dir=str(tmp_path), node_name="n1", node_rank=3
+    )
+    problem = d.observe()
+    assert problem is not None
+    assert problem.observation == FAULT_OBSERVATION_RESET
+    assert problem.extra_infos.get("wait_seconds") == DEFAULT_RESET_WAIT_SECONDS
+    assert d.observe() is None
+    monkeypatch.delenv("POD_NAME", raising=False)
+
+
 def test_resolve_produces_node_action(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("POD_NAME", "p0")
-    _write_fault(tmp_path, _fault_doc("fatal", [_pod("p0", 500)]))
+    _write_fault(tmp_path, _fault_doc("fatal", [_pod("p0", "fatal")]))
     d = FaultConfigDiagnostician(
         fault_config_dir=str(tmp_path), node_name="n1", node_rank=3
     )
@@ -110,14 +126,34 @@ def test_resolve_produces_node_action(tmp_path: Path, monkeypatch):
     kwargs = getattr(action, "kwargs", None)
     if kwargs is not None:
         assert kwargs["action_type"] == DiagnosisActionType.RELAUNCH_WORKER
+        assert kwargs["instance"] == -3
         assert kwargs["node_id"] == 3
         assert kwargs["node_type"] == "worker"
     monkeypatch.delenv("POD_NAME", raising=False)
 
 
+def test_resolve_reset_produces_restart_action(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("POD_NAME", "p0")
+    _write_fault(tmp_path, _fault_doc("reset", [_pod("p0", "reset")]))
+    d = FaultConfigDiagnostician(
+        fault_config_dir=str(tmp_path), node_name="n1", node_rank=3
+    )
+    problem = d.observe()
+    actions = d.resolve(problem)
+    assert len(actions) == 1
+    action = actions[0]
+    assert isinstance(action, NodeAction)
+    kwargs = getattr(action, "kwargs", None)
+    if kwargs is not None:
+        assert kwargs["action_type"] == DiagnosisActionType.RESTART_WORKER
+        assert kwargs["instance"] == -3
+        assert kwargs["wait_seconds"] == DEFAULT_RESET_WAIT_SECONDS
+    monkeypatch.delenv("POD_NAME", raising=False)
+
+
 def test_observe_none_when_current_pod_not_sparse_list(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("POD_NAME", "p1")
-    _write_fault(tmp_path, _fault_doc("fatal", [_pod("p0", 500)]))
+    _write_fault(tmp_path, _fault_doc("fatal", [_pod("p0", "fatal")]))
     d = FaultConfigDiagnostician(
         fault_config_dir=str(tmp_path), node_name="n1", node_rank=3
     )

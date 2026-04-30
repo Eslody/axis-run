@@ -15,6 +15,7 @@ import pytest
 from axis_run.diagnosis.fault_failover import (
     SEVERITY_FATAL,
     SEVERITY_OK,
+    SEVERITY_RESET,
     SEVERITY_WARN,
     FaultConfigFailover,
 )
@@ -22,7 +23,7 @@ from axis_run.diagnosis.fault_failover import (
 
 def _fault_doc(overall: str, pods: list[dict] | None = None) -> dict:
     return {
-        "schema": "v3",
+        "schema": "v4",
         "overall_severity": overall,
         "updated_at": 1714000000,
         "jobs": {
@@ -50,13 +51,13 @@ def _fault_doc(overall: str, pods: list[dict] | None = None) -> dict:
     }
 
 
-def _pod(name: str, healthy_id: int) -> dict:
+def _pod(name: str, severity: str) -> dict:
     return {
         "name": name,
         "status": "Running",
         "node": {
             "name": "node-a",
-            "healthyID": healthy_id,
+            "severity": severity,
             "resources": [],
         },
     }
@@ -76,7 +77,7 @@ def test_severity_defaults_to_ok_when_no_file(tmp_path: Path):
 
 
 def test_overall_ok_short_circuits_without_pod_scan(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc(SEVERITY_OK, [_pod("pod-a", 500)]))
+    _write_fault(tmp_path, _fault_doc(SEVERITY_OK, [_pod("pod-a", SEVERITY_FATAL)]))
     f = FaultConfigFailover(
         fault_config_dir=str(tmp_path), node_name="node-a", pod_name="pod-a"
     )
@@ -84,7 +85,7 @@ def test_overall_ok_short_circuits_without_pod_scan(tmp_path: Path):
 
 
 def test_fatal_pod_matches_by_name(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", 500)]))
+    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", SEVERITY_FATAL)]))
     f = FaultConfigFailover(
         fault_config_dir=str(tmp_path), node_name="node-a", pod_name="pod-a"
     )
@@ -92,15 +93,23 @@ def test_fatal_pod_matches_by_name(tmp_path: Path):
 
 
 def test_warn_pod_matches_by_name(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc(SEVERITY_WARN, [_pod("pod-a", 400)]))
+    _write_fault(tmp_path, _fault_doc(SEVERITY_WARN, [_pod("pod-a", SEVERITY_WARN)]))
     f = FaultConfigFailover(
         fault_config_dir=str(tmp_path), node_name="node-a", pod_name="pod-a"
     )
     assert f.read_severity() == SEVERITY_WARN
 
 
+def test_reset_pod_matches_by_name(tmp_path: Path):
+    _write_fault(tmp_path, _fault_doc(SEVERITY_RESET, [_pod("pod-a", SEVERITY_RESET)]))
+    f = FaultConfigFailover(
+        fault_config_dir=str(tmp_path), node_name="node-a", pod_name="pod-a"
+    )
+    assert f.read_severity() == SEVERITY_RESET
+
+
 def test_sparse_pods_missing_current_pod_returns_ok(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", 500)]))
+    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", SEVERITY_FATAL)]))
     f = FaultConfigFailover(
         fault_config_dir=str(tmp_path), node_name="node-a", pod_name="pod-b"
     )
@@ -125,7 +134,7 @@ def test_non_dict_json_returns_ok(tmp_path: Path):
 
 def test_env_fallback(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("POD_NAME", "pod-a")
-    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", 500)]))
+    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", SEVERITY_FATAL)]))
     f = FaultConfigFailover(fault_config_dir=str(tmp_path))
     assert f.pod_name == "pod-a"
     assert f.read_severity() == SEVERITY_FATAL
@@ -133,6 +142,6 @@ def test_env_fallback(tmp_path: Path, monkeypatch):
 
 
 def test_missing_pod_name_returns_overall_severity(tmp_path: Path):
-    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", 500)]))
+    _write_fault(tmp_path, _fault_doc(SEVERITY_FATAL, [_pod("pod-a", SEVERITY_FATAL)]))
     f = FaultConfigFailover(fault_config_dir=str(tmp_path), node_name="node-a")
     assert f.read_severity() == SEVERITY_FATAL

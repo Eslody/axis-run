@@ -5,8 +5,9 @@
 
     1) observe：读取 ``<fault_config_dir>/fault.json`` 顶层 ``overall_severity``；
        ok 时短路，非 ok 时通过 ``POD_NAME`` 匹配稀疏 ``pods`` 条目。若当前
-       Pod severity=fatal，返回非空 Observation。否则返回 None（NoAction）。
-    2) resolve：产出 ``NodeAction(action_type=RELAUNCH_WORKER)``，上报给
+       Pod severity=fatal/reset，返回非空 Observation。否则返回 None（NoAction）。
+    2) resolve：fatal 产出 ``NodeAction(action_type=RELAUNCH_WORKER)``，reset
+       产出 ``NodeAction(action_type=RESTART_WORKER)``，上报给
        dlrover action queue；agent 侧 ``_invoke_run`` 下一轮会 stop_workers 并
        把 WorkerState 置为 FAILED，从而退出进程、让 JobSet 换 Pod。
 
@@ -24,10 +25,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import List, Optional
 
 try:
-    from dlrover.python.diagnosis.common.constants import DiagnosisActionType
+    from dlrover.python.diagnosis.common.constants import (
+        DiagnosisActionType,
+        DiagnosisConstant,
+    )
     from dlrover.python.diagnosis.common.diagnosis_action import (
         DiagnosisAction,
         NoAction,
@@ -70,18 +75,25 @@ except Exception:  # pragma: no cover
             self.kwargs = kwargs
 
     class DiagnosisActionType:  # type: ignore[no-redef]
+        RESTART_WORKER = "restart_worker"
         RELAUNCH_WORKER = "relaunch_worker"
+
+    class DiagnosisConstant:  # type: ignore[no-redef]
+        LOCAL_INSTANCE = -3
 
     _DLROVER_AVAILABLE = False
 
 from axis_run.diagnosis.fault_failover import (
     SEVERITY_FATAL,
+    SEVERITY_RESET,
     FaultConfigFailover,
 )
 
 logger = logging.getLogger(__name__)
 
 FAULT_OBSERVATION_FATAL = "AxisFaultConfigFatal"
+FAULT_OBSERVATION_RESET = "AxisFaultConfigReset"
+DEFAULT_RESET_WAIT_SECONDS = 300
 
 
 class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
@@ -107,12 +119,18 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
             self._node_rank = int(raw_rank)
         except (TypeError, ValueError):
             self._node_rank = 0
+        self._last_reset_observation_at = -float(DEFAULT_RESET_WAIT_SECONDS)
 
     def observe(self, **_kwargs) -> Optional[DiagnosisObservation]:  # type: ignore[override]
-        """每轮读本 Pod severity；fatal 时返回带 Pod/节点信息的 Observation。"""
+        """每轮读本 Pod severity；fatal/reset 时返回带 Pod/节点信息的 Observation。"""
         severity = self._reader.read_severity()
-        if severity != SEVERITY_FATAL:
+        if severity not in (SEVERITY_FATAL, SEVERITY_RESET):
             return None
+        if severity == SEVERITY_RESET:
+            now = time.monotonic()
+            if now - self._last_reset_observation_at < DEFAULT_RESET_WAIT_SECONDS:
+                return None
+            self._last_reset_observation_at = now
 
         extra = {
             "pod_name": self._reader.pod_name,
@@ -120,8 +138,15 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
             "severity": severity,
             "fault_config_dir": self._reader.fault_config_dir,
         }
+        if severity == SEVERITY_RESET:
+            extra["wait_seconds"] = DEFAULT_RESET_WAIT_SECONDS
         return DiagnosisObservation(
-            observation=FAULT_OBSERVATION_FATAL, extra_infos=extra
+            observation=(
+                FAULT_OBSERVATION_FATAL
+                if severity == SEVERITY_FATAL
+                else FAULT_OBSERVATION_RESET
+            ),
+            extra_infos=extra,
         )
 
     def resolve(
@@ -129,15 +154,24 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
         problem: DiagnosisObservation,
         **_kwargs,
     ) -> List[DiagnosisAction]:  # type: ignore[override]
-        """把 fatal 问题转成 RELAUNCH_WORKER 动作。"""
-        if not problem or problem.observation != FAULT_OBSERVATION_FATAL:
+        """把 fatal/reset 问题转成本地 worker 动作。"""
+        if not problem or problem.observation not in (
+            FAULT_OBSERVATION_FATAL,
+            FAULT_OBSERVATION_RESET,
+        ):
             return [NoAction()]
 
         extras = problem.extra_infos or {}
+        action_type = (
+            DiagnosisActionType.RELAUNCH_WORKER
+            if problem.observation == FAULT_OBSERVATION_FATAL
+            else DiagnosisActionType.RESTART_WORKER
+        )
+        wait_seconds = int(extras.get("wait_seconds") or 0)
         reason = (
             f"AxisFaultConfig: pod {extras.get('pod_name', 'unknown')} "
             f"node {extras.get('node_name', 'unknown')} "
-            f"severity=fatal; requesting RELAUNCH_WORKER"
+            f"severity={extras.get('severity', 'unknown')}; requesting {action_type}"
         )
         logger.warning(reason)
 
@@ -147,6 +181,13 @@ class FaultConfigDiagnostician(Diagnostician):  # type: ignore[misc]
             node_id=self._node_rank,
             node_type="worker",
             reason=reason,
-            action_type=DiagnosisActionType.RELAUNCH_WORKER,
+            instance=DiagnosisConstant.LOCAL_INSTANCE,
+            action_type=action_type,
+            expired_time_period=(wait_seconds + 60) * 1000 if wait_seconds else 0,
+            wait_seconds=wait_seconds,
         )
+        if wait_seconds:
+            # DLRover NodeAction 目前不暴露 executable_time_period 入参，这里设置
+            # 基类字段，让 DiagnosisActionQueue 在 wait_seconds 后再交给 agent 执行。
+            setattr(action, "_executable_time_period", wait_seconds)
         return [action]
