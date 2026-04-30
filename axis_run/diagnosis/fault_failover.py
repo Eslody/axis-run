@@ -159,6 +159,25 @@ class FaultConfigFailover(_DynamicAgentFailoverExtension):  # type: ignore[misc]
             return None
         return doc
 
+    def _load_entries(self, path: str) -> Optional[list]:
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("failed to read %s: %s; ignore this file", path, e)
+            return None
+
+        if not isinstance(entries, list):
+            logger.warning(
+                "unexpected %s structure: %r; ignore this file",
+                os.path.basename(path),
+                type(entries).__name__,
+            )
+            return None
+        return entries
+
     @property
     def fault_config_dir(self) -> str:
         return self._dir

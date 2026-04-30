@@ -68,6 +68,12 @@ def _write_fault(tmpdir: Path, doc: dict) -> Path:
     return p
 
 
+def _write_pods(tmpdir: Path, entries) -> Path:
+    p = tmpdir / "pods.json"
+    p.write_text(json.dumps(entries), encoding="utf-8")
+    return p
+
+
 def test_severity_defaults_to_ok_when_no_file(tmp_path: Path):
     failover = FaultConfigFailover(
         fault_config_dir=str(tmp_path), node_name="node-a", pod_name="pod-a"
