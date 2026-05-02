@@ -41,6 +41,8 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+from axis_run.progress import client as progress_client
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CKPT_ENV_KEY = "AXIS_CKPT_DIR"
@@ -134,6 +136,7 @@ class FlashCheckpointHelper:
         global_step, target_path, checkpoint_path = self._resolve_step_and_path(
             epoch, step, path
         )
+        progress_client.on_step_done(global_step)
         self._checkpointer.save_checkpoint(
             global_step,
             state,
@@ -169,6 +172,7 @@ class FlashCheckpointHelper:
             target_path,
             default_layout=checkpoint_path == "",
         )
+        progress_client.on_disk_ckpt_saved(global_step)
         logger.info(
             "flash ckpt [disk] saved: step=%d path=%s", global_step, target_path
         )

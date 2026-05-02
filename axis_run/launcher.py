@@ -64,6 +64,7 @@ def run() -> None:
     )
 
     master = None
+    progress_reporter = None
     try:
         dlrover_master_addr = _prepare_dlrover_master(
             node_rank=node_rank,
@@ -77,6 +78,11 @@ def run() -> None:
 
         # 1) 广播 dlrover master addr 给本 Pod 的 agent。
         _set_master_env(dlrover_master_addr.addr, job_name)
+
+        from axis_run.progress.reporter import ProgressReporter
+
+        progress_reporter = ProgressReporter.for_rank(rank=node_rank, job_name=job_name)
+        progress_reporter.start()
 
         # 2) 再次探测 master 是否可达（rank 0 已在 master.start 内等待，rank>0
         #    这里需要等 master DNS 生效 + 端口就绪）。
@@ -118,6 +124,11 @@ def run() -> None:
         logger.exception("axis-run failed: %s", exc)
         _fail(f"axis-run crashed: {exc}")
     finally:
+        if progress_reporter is not None:
+            try:
+                progress_reporter.flush_and_close()
+            except Exception:
+                pass
         if master is not None:
             try:
                 master.stop()
