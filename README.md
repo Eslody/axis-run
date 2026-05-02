@@ -85,9 +85,11 @@ axis-run \
 | `AXIS_MASTER_PORT` | `50001` | rank 0 上 LocalJobMaster 监听的 gRPC 端口 |
 | `AXIS_FAULT_CONFIG_DIR` | `/etc/training-platform/fault` | 挂载 `job-fault-configmap` 的目录 |
 | `AXIS_CKPT_DIR` | _（无，可选）_ | `FlashCheckpointHelper` 默认保存根目录 |
+| `AXIS_PROGRESS_ENDPOINT` | _（由 axis-run 启动时注入）_ | 训练脚本调用 `axis_run.progress` SDK 上报 first_step / disk ckpt 的本地 HTTP endpoint |
 | `JOB_NAME` | _（由 kubeflow-trainer 注入）_ | Diagnostician 报告日志用 |
 | `POD_NAME` | _（由 Downward API 注入）_ | 用于匹配 `job-fault-configmap/fault.json` 中的当前 Pod |
 | `NODE_NAME` | _（由 Downward API 注入）_ | Diagnostician 日志与 fault.json 节点信息排查用 |
+| `POD_NAMESPACE` | _（由 Downward API 注入）_ | rank0 reporter patch `train-progress-<JOB_NAME>` ConfigMap 时使用 |
 | `PET_*` | 由 JobSet 注入 | 与 `torchrun` 完全一致，不做改动 |
 
 ### 2.4 版本兼容策略
@@ -132,6 +134,29 @@ Snapshot-agent / fault-restart-controller 负责**写入** `job-fault-configmap/
 | `fatal` | `FaultConfigDiagnostician` enqueue 本地 `RELAUNCH_WORKER`，让 JobSet 重建 Pod |
 
 详见 [`docs/INTEGRATION_TEST.md`](./docs/INTEGRATION_TEST.md)。
+
+### 3.1 ETTR 训练进度上报
+
+`axis_run.progress.reporter` 只在 rank0 启用，启动后通过本地 HTTP endpoint 接收训练脚本事件，再异步 patch
+`train-progress-<JOB_NAME>` ConfigMap。训练主循环不直接依赖 Kubernetes client。
+
+训练脚本或 checkpoint helper 只需要调用轻量 SDK：
+
+```python
+from axis_run.progress import on_disk_ckpt_saved, on_first_step
+
+on_first_step(step)
+
+# 必须在 disk checkpoint 完全持久化后调用；memory/SHM checkpoint 不调用。
+on_disk_ckpt_saved(step)
+```
+
+上报约束：
+
+- `on_first_step` 只记录首次 step 完成时间；
+- `on_disk_ckpt_saved` 只在 disk checkpoint durable 后触发 ConfigMap 更新；
+- reporter 没有 `on_step` API，也没有周期 heartbeat；
+- 进程退出时通过 `atexit` / SIGTERM best-effort 写一次 `ended_at/ended_reason`。
 
 ---
 
