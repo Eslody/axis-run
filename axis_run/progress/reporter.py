@@ -155,8 +155,8 @@ class ProgressReporter:
         self,
         *,
         enabled: bool,
-        job_name: str,
         rank: int,
+        job_name: Optional[str] = None,
         namespace: Optional[str] = None,
         cm_name: Optional[str] = None,
         job_id: Optional[str] = None,
@@ -164,18 +164,19 @@ class ProgressReporter:
         resume_from_step: Optional[int] = None,
     ) -> None:
         self.enabled = bool(enabled)
+        resolved_job_name = job_name or os.getenv("JOB_NAME", "")
         self.namespace = namespace or os.getenv("POD_NAMESPACE", "default")
-        self.cm_name = cm_name or f"train-progress-{job_name}"
+        self.cm_name = cm_name or f"train-progress-{resolved_job_name}"
         resolved_job_id = job_id or os.getenv("TRAINING_PLATFORM_JOB_ID", "")
         if not resolved_job_id and self.cm_name.startswith("train-progress-"):
-            resolved_job_id = self.cm_name[len("train-progress-") :]
+            resolved_job_id = self.cm_name[len("train-progress-"):]
             if resolved_job_id.startswith("job-"):
-                resolved_job_id = resolved_job_id[len("job-") :]
+                resolved_job_id = resolved_job_id[len("job-"):]
         now = _to_rfc3339(_utc_now())
         self._state = TrainProgressState(
             schema_version=1,
             job_id=resolved_job_id,
-            job_name=job_name,
+            job_name=resolved_job_name,
             process_uid=str(uuid.uuid4()),
             pod_name=pod_name or os.getenv("POD_NAME", "") or os.getenv("HOSTNAME", ""),
             rank=int(rank),
@@ -193,8 +194,8 @@ class ProgressReporter:
         self._k8s_api: Optional[_InClusterConfigMapREST] = None
 
     @classmethod
-    def for_rank(cls, *, rank: int, job_name: str) -> "ProgressReporter":
-        return cls(enabled=int(rank) == 0, rank=rank, job_name=job_name)
+    def for_rank(cls, *, rank: int) -> "ProgressReporter":
+        return cls(enabled=int(rank) == 0, rank=rank)
 
     def start(self) -> None:
         if not self.enabled:
