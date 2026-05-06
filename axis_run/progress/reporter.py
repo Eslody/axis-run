@@ -3,6 +3,9 @@
 Only rank 0 starts a reporter. The reporter patches ConfigMap on process start,
 first step, disk checkpoint persisted, and process close. There is no periodic
 heartbeat or per-step update.
+
+Note: last_ckpt_at records the most recent step completion time at checkpoint,
+not the checkpoint I/O completion time, for accurate ETTR calculation.
 """
 
 from __future__ import annotations
@@ -15,8 +18,12 @@ import logging
 import os
 import queue
 import signal
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +33,88 @@ logger = logging.getLogger(__name__)
 
 PROGRESS_ENDPOINT_ENV = "AXIS_PROGRESS_ENDPOINT"
 MAX_SEGMENTS = 200
+
+_SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+
+class _K8sConflict(Exception):
+    """HTTP 409 while patching ConfigMap; caller may retry read-modify-write."""
+
+
+class _InClusterConfigMapREST:
+    """Minimal ConfigMap client via Kubernetes REST API (stdlib only, no kubernetes pip)."""
+
+    def __init__(self) -> None:
+        token_path = os.path.join(_SA_DIR, "token")
+        ns_path = os.path.join(_SA_DIR, "namespace")
+        ca_path = os.path.join(_SA_DIR, "ca.crt")
+        for p in (token_path, ns_path, ca_path):
+            if not os.path.isfile(p):
+                raise FileNotFoundError(f"missing in-cluster serviceaccount file: {p}")
+        with open(token_path, encoding="utf-8") as f:
+            self._token = f.read().strip()
+        with open(ns_path, encoding="utf-8") as f:
+            if not f.read().strip():
+                raise ValueError("empty serviceaccount namespace file")
+        host = os.getenv("KUBERNETES_SERVICE_HOST", "").strip()
+        port = os.getenv("KUBERNETES_SERVICE_PORT", "443").strip()
+        if not host:
+            raise OSError("KUBERNETES_SERVICE_HOST is not set")
+        self._base = f"https://{host}:{port}"
+        self._ssl = ssl.create_default_context(cafile=ca_path)
+
+    def read_config_map(self, namespace: str, name: str) -> Dict[str, Any]:
+        path = (
+            f"/api/v1/namespaces/{urllib.parse.quote(namespace)}"
+            f"/configmaps/{urllib.parse.quote(name)}"
+        )
+        return self._request("GET", path, None)
+
+    def merge_patch_config_map_data(
+        self, namespace: str, name: str, data: Dict[str, str]
+    ) -> None:
+        path = (
+            f"/api/v1/namespaces/{urllib.parse.quote(namespace)}"
+            f"/configmaps/{urllib.parse.quote(name)}"
+        )
+        body = json.dumps({"data": data}, separators=(",", ":")).encode("utf-8")
+        self._request(
+            "PATCH",
+            path,
+            body,
+            "application/merge-patch+json",
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[bytes],
+        content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        url = self._base + path
+        req = urllib.request.Request(url, data=body, method=method)
+        req.add_header("Authorization", f"Bearer {self._token}")
+        if body is not None and content_type:
+            req.add_header("Content-Type", content_type)
+        try:
+            with urllib.request.urlopen(req, context=self._ssl, timeout=30) as resp:
+                raw = resp.read()
+                if not raw:
+                    return {}
+                parsed = json.loads(raw.decode("utf-8"))
+                return parsed if isinstance(parsed, dict) else {}
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            if exc.code == 409:
+                raise _K8sConflict(f"conflict: {detail}") from exc
+            raise RuntimeError(
+                f"kubernetes api {method} {path} failed: http {exc.code} {detail}"
+            ) from exc
 
 
 def _utc_now() -> dt.datetime:
@@ -101,7 +190,7 @@ class ProgressReporter:
         self._server: Optional[ThreadingHTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
         self._old_handlers: Dict[int, Any] = {}
-        self._k8s_api = None
+        self._k8s_api: Optional[_InClusterConfigMapREST] = None
 
     @classmethod
     def for_rank(cls, *, rank: int, job_name: str) -> "ProgressReporter":
@@ -134,12 +223,20 @@ class ProgressReporter:
         self._queue.put("flush")
 
     def on_disk_ckpt_saved(self, step: int, at: Optional[dt.datetime] = None) -> None:
+        """Record disk checkpoint completion.
+
+        last_ckpt_at is set to the most recent step completion time (last_step_at)
+        rather than the checkpoint I/O completion time, so that ETTR calculation
+        reflects actual productive training time without checkpoint write overhead.
+        """
         if not self.enabled:
             return
         event_at = _to_rfc3339(at or _utc_now())
         with self._lock:
             self._state.last_ckpt_step = int(step)
-            self._state.last_ckpt_at = event_at
+            # Use last_step_at (step completion time) for ETTR accuracy;
+            # fall back to event_at only if no step has been recorded yet.
+            self._state.last_ckpt_at = self._state.last_step_at or event_at
             self._state.updated_at = event_at
         self._queue.put("flush")
 
@@ -250,24 +347,24 @@ class ProgressReporter:
 
             signal.signal(sig, _handler)
 
-    def _load_k8s_api(self):
+    def _load_k8s_api(self) -> Optional[_InClusterConfigMapREST]:
         try:
-            from kubernetes import client, config
-
-            config.load_incluster_config()
-            return client.CoreV1Api()
+            return _InClusterConfigMapREST()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("progress reporter disabled: cannot init k8s client: %s", exc)
+            logger.warning(
+                "progress reporter disabled: cannot init in-cluster k8s client: %s",
+                exc,
+            )
             return None
 
     def _patch_cm(self, segment: Dict[str, Any]) -> None:
-        if self._k8s_api is None:
+        client = self._k8s_api
+        if client is None:
             return
         for _ in range(3):
-            cm = self._k8s_api.read_namespaced_config_map(
-                name=self.cm_name, namespace=self.namespace
-            )
-            data = dict(cm.data or {})
+            cm = client.read_config_map(self.namespace, self.cm_name)
+            raw_data = cm.get("data")
+            data = dict(raw_data) if isinstance(raw_data, dict) else {}
             payload = _parse_progress(data.get("progress.json"))
             segments = payload.setdefault("segments", [])
             _upsert_segment(segments, segment)
@@ -279,15 +376,11 @@ class ProgressReporter:
             data["progress.json"] = json.dumps(
                 payload, separators=(",", ":"), sort_keys=True
             )
-            body = {"data": data}
             try:
-                self._k8s_api.patch_namespaced_config_map(
-                    name=self.cm_name, namespace=self.namespace, body=body
-                )
+                client.merge_patch_config_map_data(self.namespace, self.cm_name, data)
                 return
-            except Exception as exc:  # noqa: BLE001
-                if getattr(exc, "status", None) != 409:
-                    raise
+            except _K8sConflict:
+                continue
         raise RuntimeError("conflict patching progress ConfigMap")
 
 

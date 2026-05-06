@@ -104,7 +104,7 @@ axis-run \
 **部署建议**
 
 - **默认不要把 `torch` 写进 axis-run 的安装依赖**：训练镜像已固定 PyTorch/CUDA 时，只执行 `pip install axis-run` 或 `pip install -e .`，避免安装 axis-run 时顺带升级 torch。
-- **默认不要安装 `kubernetes` Python 包**：axis-run 的 runtime 不直接调用 K8s API；K8s 行为由平台层控制。vendored DLRover 里的 Kubernetes 模块只保留给上游兼容，不在 `platform=local` 路径加载。
+- **无需安装 `kubernetes` Python 包**：rank0 ETTR `ProgressReporter` 通过集群内 ServiceAccount（`urllib` + `ssl`，标准库）对 `train-progress-*` ConfigMap 做 GET/PATCH；不引入官方 `kubernetes` client。其它容错链路仍以挂载 ConfigMap / env 为主。vendored DLRover 里的 Kubernetes 模块只保留给上游兼容，不在 `platform=local` 路径加载。
 - **`pip install '.[torch]'`** 仅适合本机做 `axis-run --help` / 冒烟，**不要用于生产镜像**（会拉取大量 CUDA 相关 wheel）。
 - **发布与验收**：按「axis-run 的 git tag + 训练镜像 torch 版本」做组合登记；升级 torch 后至少跑 `pytest tests -q`、容器内 `axis-run --help`、以及你关心的断点续训 / 单机 elastic 用例（见 [`docs/INTEGRATION_TEST.md`](./docs/INTEGRATION_TEST.md) 的 Phase 0）。
 
