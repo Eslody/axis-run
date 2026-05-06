@@ -81,7 +81,7 @@ def run() -> None:
 
         from axis_run.progress.reporter import ProgressReporter
 
-        progress_reporter = ProgressReporter.for_rank(rank=node_rank, job_name=job_name)
+        progress_reporter = ProgressReporter.for_rank(rank=node_rank)
         progress_reporter.start()
 
         # 2) 再次探测 master 是否可达（rank 0 已在 master.start 内等待，rank>0
