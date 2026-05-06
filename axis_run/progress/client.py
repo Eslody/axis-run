@@ -28,6 +28,11 @@ def on_disk_ckpt_saved(step: int, at: Optional[float] = None) -> None:
     _post("disk_ckpt_saved", step=step, at=at)
 
 
+def on_step_done(step: int, at: Optional[float] = None) -> None:
+    # Record the latest completed step; reporter flushes on checkpoint events.
+    _post("step_done", step=step, at=at)
+
+
 def _post(event: str, *, step: int, at: Optional[float]) -> None:
     endpoint = os.getenv(ENDPOINT_ENV, "")
     if not endpoint:

@@ -136,6 +136,7 @@ class FlashCheckpointHelper:
         global_step, target_path, checkpoint_path = self._resolve_step_and_path(
             epoch, step, path
         )
+        progress_client.on_step_done(global_step)
         self._checkpointer.save_checkpoint(
             global_step,
             state,

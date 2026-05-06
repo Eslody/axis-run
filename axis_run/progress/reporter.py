@@ -77,13 +77,18 @@ class ProgressReporter:
         self.enabled = bool(enabled)
         self.namespace = namespace or os.getenv("POD_NAMESPACE", "default")
         self.cm_name = cm_name or f"train-progress-{job_name}"
+        resolved_job_id = job_id or os.getenv("TRAINING_PLATFORM_JOB_ID", "")
+        if not resolved_job_id and self.cm_name.startswith("train-progress-"):
+            resolved_job_id = self.cm_name[len("train-progress-") :]
+            if resolved_job_id.startswith("job-"):
+                resolved_job_id = resolved_job_id[len("job-") :]
         now = _to_rfc3339(_utc_now())
         self._state = TrainProgressState(
             schema_version=1,
-            job_id=job_id or os.getenv("TRAINING_PLATFORM_JOB_ID", ""),
+            job_id=resolved_job_id,
             job_name=job_name,
             process_uid=str(uuid.uuid4()),
-            pod_name=pod_name or os.getenv("HOSTNAME", ""),
+            pod_name=pod_name or os.getenv("POD_NAME", "") or os.getenv("HOSTNAME", ""),
             rank=int(rank),
             started_at=now,
             updated_at=now,
@@ -135,10 +140,18 @@ class ProgressReporter:
         with self._lock:
             self._state.last_ckpt_step = int(step)
             self._state.last_ckpt_at = event_at
+            self._state.updated_at = event_at
+        self._queue.put("flush")
+
+    def on_step_done(self, step: int, at: Optional[dt.datetime] = None) -> None:
+        """Record the latest completed step without patching ConfigMap immediately."""
+        if not self.enabled:
+            return
+        event_at = _to_rfc3339(at or _utc_now())
+        with self._lock:
             self._state.last_step = max(self._state.last_step or 0, int(step))
             self._state.last_step_at = event_at
             self._state.updated_at = event_at
-        self._queue.put("flush")
 
     def flush_and_close(self, reason: str = "normal") -> None:
         if not self.enabled or self._stop.is_set():
@@ -195,6 +208,8 @@ class ProgressReporter:
                     event_at = _from_unix(float(payload.get("at", time.time())))
                     if event == "first_step":
                         reporter.on_first_step(step, event_at)
+                    elif event == "step_done":
+                        reporter.on_step_done(step, event_at)
                     elif event == "disk_ckpt_saved":
                         reporter.on_disk_ckpt_saved(step, event_at)
                     else:
