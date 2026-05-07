@@ -146,6 +146,7 @@ class TrainProgressState:
     last_ckpt_step: Optional[int] = None
     last_ckpt_at: Optional[str] = None
     resume_from_step: Optional[int] = None
+    total_ckpt_overhead_seconds: float = 0.0
     ended_at: Optional[str] = None
     ended_reason: Optional[str] = None
 
@@ -192,6 +193,8 @@ class ProgressReporter:
         self._server_thread: Optional[threading.Thread] = None
         self._old_handlers: Dict[int, Any] = {}
         self._k8s_api: Optional[_InClusterConfigMapREST] = None
+        self._cumulative_ckpt_overhead: float = 0.0
+        self._last_disk_save_duration: float = 0.0
 
     @classmethod
     def for_rank(cls, *, rank: int) -> "ProgressReporter":
@@ -208,6 +211,14 @@ class ProgressReporter:
         self._start_http_server()
         self._install_cleanup_handlers()
         self._queue.put("flush")
+
+    def add_ckpt_overhead(self, seconds: float, is_disk_save: bool = False) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._cumulative_ckpt_overhead += seconds
+            if is_disk_save:
+                self._last_disk_save_duration = seconds
 
     def on_first_step(self, step: int, at: Optional[dt.datetime] = None) -> None:
         if not self.enabled:
@@ -239,6 +250,10 @@ class ProgressReporter:
             # fall back to event_at only if no step has been recorded yet.
             self._state.last_ckpt_at = self._state.last_step_at or event_at
             self._state.updated_at = event_at
+            self._state.total_ckpt_overhead_seconds = (
+                self._cumulative_ckpt_overhead - self._last_disk_save_duration
+            )
+            self._last_disk_save_duration = 0.0
         self._queue.put("flush")
 
     def on_step_done(self, step: int, at: Optional[dt.datetime] = None) -> None:
@@ -310,6 +325,10 @@ class ProgressReporter:
                         reporter.on_step_done(step, event_at)
                     elif event == "disk_ckpt_saved":
                         reporter.on_disk_ckpt_saved(step, event_at)
+                    elif event == "ckpt_overhead":
+                        seconds = float(payload.get("seconds", 0))
+                        is_disk = bool(payload.get("is_disk", False))
+                        reporter.add_ckpt_overhead(seconds, is_disk)
                     else:
                         raise ValueError(f"unknown event {event}")
                 except Exception as exc:  # noqa: BLE001

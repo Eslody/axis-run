@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 from axis_run.progress import client as progress_client
@@ -137,12 +138,14 @@ class FlashCheckpointHelper:
             epoch, step, path
         )
         progress_client.on_step_done(global_step)
+        t0 = time.monotonic()
         self._checkpointer.save_checkpoint(
             global_step,
             state,
             checkpoint_path,
             storage_type=self._StorageType.MEMORY,
         )
+        progress_client.report_ckpt_overhead(time.monotonic() - t0, is_disk=False)
         logger.info(
             "flash ckpt [memory] saved: step=%d path=%s", global_step, target_path
         )
@@ -159,6 +162,7 @@ class FlashCheckpointHelper:
         global_step, target_path, checkpoint_path = self._resolve_step_and_path(
             epoch, step, path
         )
+        t0 = time.monotonic()
         self._checkpointer.save_checkpoint(
             global_step,
             state,
@@ -172,6 +176,7 @@ class FlashCheckpointHelper:
             target_path,
             default_layout=checkpoint_path == "",
         )
+        progress_client.report_ckpt_overhead(time.monotonic() - t0, is_disk=True)
         progress_client.on_disk_ckpt_saved(global_step)
         logger.info(
             "flash ckpt [disk] saved: step=%d path=%s", global_step, target_path
