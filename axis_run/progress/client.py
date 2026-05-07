@@ -12,7 +12,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,12 @@ def on_step_done(step: int, at: Optional[float] = None) -> None:
     _post("step_done", step=step, at=at)
 
 
-def _post(event: str, *, step: int, at: Optional[float]) -> None:
+def report_ckpt_overhead(seconds: float, is_disk: bool = False) -> None:
+    """Report checkpoint operation overhead (seconds). Internal use by axis-run."""
+    _post("ckpt_overhead", seconds=seconds, is_disk=is_disk)
+
+
+def _post(event: str, *, step: int = 0, at: Optional[float] = None, **kwargs: Any) -> None:
     endpoint = os.getenv(ENDPOINT_ENV, "")
     if not endpoint:
         return
@@ -42,6 +47,7 @@ def _post(event: str, *, step: int, at: Optional[float]) -> None:
             "event": event,
             "step": int(step),
             "at": float(at if at is not None else time.time()),
+            **kwargs,
         }
     ).encode("utf-8")
     req = urllib.request.Request(
