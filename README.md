@@ -23,7 +23,8 @@ axis-run/
 │   ├── env_resolver.py     # 从环境变量解析节点拓扑 / rank
 │   ├── compat.py           # PyTorch elastic / ElasticLaunchConfig 签名兼容层
 │   ├── launcher.py         # 主启动入口，串起 master / agent / diagnostician
-│   ├── main.py             # pip console_script 入口
+│   ├── main.py             # pip console_script 入口（axis-run）
+│   ├── torchrun_shim.py    # pip 覆盖 torchrun 命令时转发到 launcher 或原生 torchrun
 │   └── master.py           # LocalJobMaster 子进程守护
 ├── dlrover/                # vendor 自 intelligent-machine-learning/dlrover（含 3 处补丁）
 ├── docs/                   # 集成测试/设计文档
@@ -78,10 +79,15 @@ axis-run \
     train.py --epoch 10
 ```
 
+安装 **`torch` 之后再安装 axis-run**（或 `pip install -e .` 覆盖脚本）时，pip 会在 `PATH` 里注册 `torchrun`，其行为与直接执行 `axis-run` 相同（见 `axis_run/torchrun_shim.py`），现有 `torchrun ... train.py` 脚本无需改名。
+
+若需要**原生** PyTorch `torch.distributed.run`（不经 dlrover LocalJobMaster），请设置环境变量 `AXIS_TORCHRUN_LEGACY=1`（或 `true` / `yes`）。也可用 `python -m torch.distributed.run` 绕过已安装的 `torchrun` 脚本。
+
 ### 2.3 关键环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `AXIS_TORCHRUN_LEGACY` | _（未设置）_ | 置为 `1` / `true` 时，`torchrun` 入口回退到原生 PyTorch，不走路径与 `axis-run` 相同的 launcher |
 | `AXIS_MASTER_PORT` | `50001` | rank 0 上 LocalJobMaster 监听的 gRPC 端口 |
 | `AXIS_FAULT_CONFIG_DIR` | `/etc/training-platform/fault` | 挂载 `job-fault-configmap` 的目录 |
 | `AXIS_CKPT_DIR` | _（无，可选）_ | `FlashCheckpointHelper` 默认保存根目录 |
