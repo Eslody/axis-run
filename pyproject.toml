@@ -46,6 +46,8 @@ test = ["pytest>=7", "pytest-mock>=3.10"]
 
 [project.scripts]
 axis-run = "axis_run.main:entrypoint"
+# pip 安装顺序晚于 torch 时，本入口会覆盖 PyTorch 自带的 torchrun 可执行文件
+torchrun = "axis_run.torchrun_shim:main"
 # 保留上游 CLI，便于排障与兼容已有脚本
 dlrover-run = "dlrover.trainer.torch.main:main"
 
